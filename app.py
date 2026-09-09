@@ -307,16 +307,20 @@ USER_NAME = st.session_state["auth_user"]
 # --- Personal watchlist (this logged-in account, this session) --------------
 
 def _load_personal_codes():
+    """Returns (codes, is_first_time). is_first_time is True when this
+    account had no saved watchlist yet (a brand-new account, or the
+    "shouldn't normally happen" None case) -- used below to show a
+    one-time welcome message, in addition to falling back to the shared
+    registry rather than leaving this session with an empty watchlist (an
+    empty list breaks several tabs below, e.g. st.columns(0))."""
     saved = user_store.load_user_codes(USER_NAME)
-    if saved is None:
-        # Shouldn't normally happen post-login, but fall back to the
-        # shared registry rather than crashing if it ever does.
-        saved = [s["code"] for s in config.WATCHLIST]
-    return saved
+    if not saved:
+        return [s["code"] for s in config.WATCHLIST], True
+    return saved, False
 
 
 if "personal_codes" not in st.session_state:
-    st.session_state["personal_codes"] = _load_personal_codes()
+    st.session_state["personal_codes"], st.session_state["show_welcome"] = _load_personal_codes()
 
 
 def _save_personal_codes():
@@ -343,6 +347,7 @@ st.sidebar.write(f"👤 {USER_NAME}")
 if st.sidebar.button("登出"):
     st.session_state["auth_user"] = None
     st.session_state.pop("personal_codes", None)
+    st.session_state.pop("show_welcome", None)
     st.rerun()
 st.sidebar.divider()
 
@@ -439,6 +444,19 @@ if st.sidebar.button("重新計算 DDM 估值", use_container_width=True):
 # --- Header ------------------------------------------------------------------
 
 st.title("台灣股票追蹤器")
+
+if st.session_state.get("show_welcome"):
+    st.info(
+        "👋 歡迎，這是你第一次登入！系統已經幫你放入預設的追蹤清單（下面會列出來），"
+        "你可以隨時到左側「我的追蹤清單」新增或移除想追蹤的股票。如果畫面上的表格都顯示"
+        "「尚無資料」，代表這是全站第一次抓取，請先到左側「更新資料」按「🔄 一鍵抓取全部"
+        "資料」。",
+        icon="👋",
+    )
+    if st.button("我知道了"):
+        st.session_state["show_welcome"] = False
+        st.rerun()
+
 my_watchlist = personal_watchlist()
 st.caption("我的追蹤清單：" + "、".join(f"{s['code']} {s['name']}" for s in my_watchlist))
 
