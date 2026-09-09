@@ -337,18 +337,38 @@ sold that day; positive = net bought, negative = net sold) for the three
 groups TWSE tracks separately: 外資 (foreign investors), 投信
 (investment trusts), and 自營商 (securities dealers).
 
-**Data source and why it's opt-in by default:** TWSE's `T86` report
+**Backfill window is deliberately identical to the price history's** --
+this fetches the same `config.PRICE_HISTORY_MONTHS` calendar months back
+from today (default 36, i.e. 3 years) that `price_data.py` does, per
+explicit request to keep the two histories covering the same span. It's
+computed independently (walking day-by-day rather than month-by-month)
+but always lands on the same starting month.
+
+**Data source and why the first run is slow:** TWSE's `T86` report
 (`三大法人買賣超日報`) is shaped differently from the price/dividend
 sources above -- one call returns *every* listed stock for *one*
 calendar day, rather than one stock's whole history in a call. That
 means a full backfill costs roughly one request **per trading day**, not
-per ticker, which adds up fast (and is why this has its own sidebar
-button in the app, kept separate from "一鍵抓取全部資料" rather than
-folded in). `config.INSTITUTIONAL_HISTORY_DAYS` (default 90 calendar
-days) controls how far back the first run goes; raise it if you want
-deeper history and don't mind a longer first run. Every run after the
-first only fetches days still missing for at least one watchlist ticker,
-same incremental idea as `price_data.py`.
+per ticker -- at the default 36-month window, that's on the order of
+700-780 requests, or roughly **20-30+ minutes** at
+`REQUEST_DELAY_SECONDS`'s pace (more with network latency/retries). This
+is a one-time cost: every run after the first only fetches days still
+missing for at least one watchlist ticker (same incremental idea as
+`price_data.py`), so daily re-runs are fast. Progress is checkpointed to
+disk every 20 requests and printed to the console, so an interrupted run
+doesn't lose everything and a re-run picks up roughly where it left off.
+
+Because of that first-run cost, running `python institutional_data.py`
+directly (so you can watch progress in a terminal) is more comfortable
+for the very first backfill than clicking the button in the app and
+waiting on a spinner. In the app it's folded into "🔄 一鍵抓取全部資料"
+(fetched last, after prices/dividends/news/market-value) but also has its
+own standalone sidebar button ("抓取三大法人買賣超") if you just want to
+refresh this one thing. On the command line it's still opt-in via
+`--institutional` (kept out of `python main.py`'s plain default run, same
+as `--market-value`, so a bare `python main.py` stays fast) -- but note
+raising `PRICE_HISTORY_MONTHS` raises this fetcher's cost right along
+with it, since the two are now tied together.
 
 Field names are read out of TWSE's response by name, not position (TWSE
 has reworded/reordered T86's columns before). 外資 net is the sum of the

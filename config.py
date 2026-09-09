@@ -79,22 +79,21 @@ KNOWN_SPLITS = {
 # How many months of daily price history to backfill on the first run.
 # Subsequent runs only fetch months that are missing (see price_data.py),
 # so this only matters the very first time you run the tool.
+#
+# Also used by institutional_data.py (三大法人買賣超) as of 2026-09-09, per
+# explicit request to keep both histories covering the exact same time
+# span -- institutional_data.py backfills the same PRICE_HISTORY_MONTHS
+# calendar months back from today, just walked day-by-day instead of
+# month-by-month. Be aware that's a MUCH more expensive backfill for that
+# data source than for prices: TWSE's T86 report returns every stock for
+# ONE day per call, so raising this number multiplies institutional_data's
+# first-run request count directly (see its module docstring for the
+# rough time cost at the current default).
 PRICE_HISTORY_MONTHS = 36
 
 # Seconds to wait between TWSE requests. TWSE throttles/blocks IPs that
 # request too fast, so keep this conservative (>=1.5s recommended).
 REQUEST_DELAY_SECONDS = 1.5
-
-# How many calendar days of 三大法人 (foreign/investment-trust/dealer) net
-# buy-sell history to backfill, used by institutional_data.py. Kept much
-# smaller than PRICE_HISTORY_MONTHS on purpose: that report's TWSE
-# endpoint (T86) returns EVERY stock for ONE day per call, so a full
-# backfill costs roughly one request PER TRADING DAY, not per ticker --
-# much more expensive than price_data.py's per-ticker-per-month calls.
-# Raise this if you want deeper history and don't mind the longer first
-# run (subsequent runs only fetch days missing for at least one watchlist
-# ticker, same incremental idea as PRICE_HISTORY_MONTHS).
-INSTITUTIONAL_HISTORY_DAYS = 90
 
 # How many news headlines to keep per company per run.
 NEWS_ITEMS_PER_COMPANY = 15
