@@ -10,7 +10,7 @@ train on.
 
 ```
 config.py               Watchlist + all settings (edit this, not the scripts below)
-main.py                 Orchestrator: python main.py [--prices] [--dividends] [--news] [--market-value]
+main.py                 Orchestrator: python main.py [--prices] [--dividends] [--news] [--market-value] [--institutional]
 app.py                   Streamlit webpage over everything below: streamlit run app.py
 
 twse_client.py           Shared rate-limited/retrying HTTP client
@@ -18,6 +18,7 @@ price_data.py             Daily OHLC price history (TWSE STOCK_DAY)
 dividend_data.py          Dividend payment history (yfinance)
 news_data.py               Recent headlines (Google News RSS)
 market_value_data.py    Shares outstanding + market value (opt-in; TWSE fund dataset + yfinance fallback)
+institutional_data.py  三大法人 (foreign/investment-trust/dealer) daily net buy-sell (opt-in; TWSE T86)
 splits.py                     Stock-split detection/adjustment, used by predict_dividends.py
 
 predict_dividends.py     Next-payment prediction (two methods) -- also the shared, split-adjusted
@@ -32,6 +33,7 @@ data/                    All fetched/computed output (gitignored -- regenerate b
   news/news.csv               Combined headlines for the whole watchlist
   shares/<code>.csv          Accumulated shares-outstanding snapshots per ticker
   market_value/<code>.csv   Daily market value per ticker (price x shares outstanding)
+  institutional/<code>.csv  Daily 外資/投信/自營商 net buy-sell per ticker
 
 requirements.txt        pip install -r requirements.txt
 .gitignore
@@ -50,6 +52,7 @@ them in sequence based on which flags you pass it.
 | Dividends | `yfinance` (Yahoo Finance) per-ticker dividend history | Actual paid distributions with ex-dividend date + amount. Tries the `.TW` (TWSE) symbol first, falls back to `.TWO` (TPEx/OTC) if empty. |
 | News | Google News RSS search, scoped to Traditional Chinese / Taiwan | No API key; returns recent headlines with title, source, publish date, and link. |
 | Shares outstanding / market value | TWSE OpenAPI dataset `t187ap47_L` (falls back to `yfinance` for non-fund tickers) | Opt-in. Confirmed working live for all 3 watchlist tickers -- see "Shares outstanding and market value" below. |
+| 三大法人買賣超 (foreign/investment-trust/dealer net buy-sell) | TWSE legacy `T86` report (`www.twse.com.tw`) | Opt-in. One HTTP call per **day** (covers every listed stock at once, then filtered down to the watchlist) rather than per stock -- see "Institutional investor net trading" below. |
 
 All of this is public data these providers publish for anyone to query,
 but none of it has a documented rate limit or terms-of-service guarantee,
@@ -121,13 +124,19 @@ streamlit run app.py
 
 Run this from the project folder, same as the commands above -- it opens
 a dashboard in your browser (usually `http://localhost:8501`, opened for
-you automatically). You'll be asked to log in first, or create an account
-if you don't have one yet (see "Login and personal watchlists" below --
-no setup needed, it just works), then you get a tab per data source
-(Prices, Dividends, Market value, DDM valuation, News) plus an Overview
+you automatically). You'll be asked to log in first, create an account,
+or continue as a guest (see "Login and personal watchlists" below -- no
+setup needed, it just works), then you get a tab per data source (Prices,
+三大法人, Dividends, Market value, DDM valuation, News) plus an Overview
 tab with quick per-ticker metrics, all scoped to your own personal
 watchlist. The sidebar has a "我的追蹤清單" section for adding/removing
 tickers from your own list -- see "Editing the watchlist" below.
+
+The Prices tab shows a candlestick chart (紅漲綠跌, the Taiwan market
+convention -- the opposite of the US red/green) plus a daily volume bar
+chart, both with the same 1週/1個月/3個月/6個月/1年/3年/全部/自訂 date-range
+picker; the 三大法人 tab reuses that same picker for its three net
+buy-sell bar charts (see "Institutional investor net trading" below).
 
 `app.py` doesn't contain any data-fetching or calculation logic of its
 own -- it only reads whatever's already in `data/*.csv` and displays it,
@@ -205,20 +214,30 @@ Other knobs in `config.py`:
 
 ## Login and personal watchlists
 
-The webpage requires logging in before showing anything — a simple
+The webpage asks you to log in before showing anything — a simple
 built-in username/password account, created right there on the login
 screen (a "註冊新帳號" tab next to "登入"). No Google account, no OAuth,
 no external setup of any kind — it works the moment you run `streamlit
-run app.py`. Two lists exist and are kept deliberately separate:
+run app.py`. There's also a **guest mode** ("以訪客身分瀏覽") for anyone
+who doesn't want an account: it lets you browse and build a watchlist
+from tickers already known to the app, but that watchlist only lives in
+that browser tab's session state — nothing about a guest is written to
+`data/users.json` or anywhere else on disk, and it's gone the moment the
+tab is closed or "結束訪客模式" is clicked. The one thing guests can't do
+is register a brand-new ticker the app has never seen before (that still
+requires a real account), since doing so writes to the shared
+`config.WATCHLIST` registry.
+
+Two lists exist and are kept deliberately separate:
 
 - The **shared/global registry** (`config.WATCHLIST`, above) — which
   tickers the app collects data for at all. Shared across everyone, since
   there's no reason to fetch the same TWSE/yfinance data twice for
   different people.
 - Each account's own **personal watchlist** — which of those tickers
-  *that account* wants to see. Every tab (Overview, Prices, Dividends,
-  Market value, DDM valuation, News) only shows this list, not the full
-  shared registry.
+  *that account* wants to see. Every tab (Overview, Prices, 三大法人,
+  Dividends, Market value, DDM valuation, News) only shows this list, not
+  the full shared registry.
 
 Accounts, password hashes, and personal watchlists all live in one local
 file, `data/users.json` (via `user_store.py` — see its docstring for the
@@ -304,6 +323,44 @@ more complete the longer you keep running this regularly). Also, ETF
 units outstanding can still shift between report dates (authorized
 participants create/redeem daily), so even the real day-by-day series is
 an approximation, not a precise intraday figure.
+
+## Institutional investor net trading (三大法人買賣超, opt-in)
+
+```
+python main.py --institutional
+# or directly:
+python institutional_data.py
+```
+
+Fetches daily net buy/sell volume (買賣超 -- shares bought minus shares
+sold that day; positive = net bought, negative = net sold) for the three
+groups TWSE tracks separately: 外資 (foreign investors), 投信
+(investment trusts), and 自營商 (securities dealers).
+
+**Data source and why it's opt-in by default:** TWSE's `T86` report
+(`三大法人買賣超日報`) is shaped differently from the price/dividend
+sources above -- one call returns *every* listed stock for *one*
+calendar day, rather than one stock's whole history in a call. That
+means a full backfill costs roughly one request **per trading day**, not
+per ticker, which adds up fast (and is why this has its own sidebar
+button in the app, kept separate from "一鍵抓取全部資料" rather than
+folded in). `config.INSTITUTIONAL_HISTORY_DAYS` (default 90 calendar
+days) controls how far back the first run goes; raise it if you want
+deeper history and don't mind a longer first run. Every run after the
+first only fetches days still missing for at least one watchlist ticker,
+same incremental idea as `price_data.py`.
+
+Field names are read out of TWSE's response by name, not position (TWSE
+has reworded/reordered T86's columns before). 外資 net is the sum of the
+two sub-columns TWSE publishes (`外陸資買賣超股數(不含外資自營商)` +
+`外資自營商買賣超股數`) since there's no single official combined
+column; 投信 and 自營商 net are each TWSE's own published aggregate
+column, used as-is rather than re-derived from finer sub-splits.
+
+Saved to `data/institutional/<code>.csv`. In the app, this shows up as
+its own "三大法人" tab with three bar charts (外資/投信/自營商 net
+buy-sell) plus the same 1週/1個月/.../自訂 date-range picker used on the
+Prices tab.
 
 ## Keeping data fresh
 

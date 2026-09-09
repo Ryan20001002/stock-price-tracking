@@ -3,11 +3,12 @@ Entry point: pulls all data sources for the watchlist defined in
 config.py.
 
 Usage:
-    python main.py                # fetch prices + dividends + news
-    python main.py --prices       # only price history
-    python main.py --dividends    # only dividend data
-    python main.py --news         # only news headlines
-    python main.py --market-value # shares outstanding + market value (opt-in, see below)
+    python main.py                  # fetch prices + dividends + news
+    python main.py --prices         # only price history
+    python main.py --dividends      # only dividend data
+    python main.py --news           # only news headlines
+    python main.py --market-value   # shares outstanding + market value (opt-in, see below)
+    python main.py --institutional  # 三大法人 net buy/sell history (opt-in, see below)
 (flags can be combined, e.g. `python main.py --prices --dividends`)
 
 --market-value is NOT part of the default "run everything" pass yet --
@@ -16,6 +17,13 @@ other three have, and it depends on data/prices/<code>.csv already
 existing, so run --prices at least once first. Run it explicitly
 (`python main.py --market-value`) until you've checked its output looks
 right, then fold it into your regular routine if it does.
+
+--institutional is also opt-in, but for a different reason: its TWSE
+report (T86) returns every listed stock for ONE day per call, so a
+backfill costs roughly one request per trading day rather than one per
+ticker (see institutional_data.py's docstring) -- folding it into the
+default run would make every plain `python main.py` noticeably slower.
+Run it explicitly, or use the separate button in the app sidebar.
 
 Speed: whenever more than one of prices/dividends/news is being fetched,
 they now run CONCURRENTLY (in separate threads) instead of one after
@@ -46,6 +54,7 @@ import price_data
 import dividend_data
 import news_data
 import market_value_data
+import institutional_data
 
 
 def _run_concurrently(jobs):
@@ -68,14 +77,16 @@ def main():
     parser.add_argument("--news", action="store_true", help="fetch recent news headlines")
     parser.add_argument("--market-value", action="store_true",
                          help="fetch shares outstanding and compute daily market value (opt-in, see module docstring)")
+    parser.add_argument("--institutional", action="store_true",
+                         help="fetch 三大法人 (foreign/investment-trust/dealer) net buy-sell history (opt-in, see module docstring)")
     parser.add_argument("--sequential", action="store_true",
                          help="fetch prices/dividends/news one at a time instead of concurrently "
                               "(slower, but keeps console output from interleaving -- handy for debugging)")
     args = parser.parse_args()
 
     # If no specific flag is given, run the three established fetchers --
-    # --market-value is opt-in only (see docstring above) until confirmed.
-    run_all = not (args.prices or args.dividends or args.news or args.market_value)
+    # --market-value and --institutional are opt-in only (see docstring above).
+    run_all = not (args.prices or args.dividends or args.news or args.market_value or args.institutional)
 
     jobs = []
     if run_all or args.prices:
@@ -100,6 +111,10 @@ def main():
         # docstring's "Speed" section for why.
         print("\n=== Shares outstanding + market value ===")
         market_value_data.run()
+
+    if args.institutional:
+        print("\n=== 三大法人買賣超 (institutional net buy/sell) ===")
+        institutional_data.run()
 
     print("\nDone. Data saved under ./data/")
 

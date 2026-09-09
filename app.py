@@ -59,6 +59,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 import config
@@ -69,8 +70,39 @@ import market_value_data
 import predict_dividends
 import ddm_valuation
 import user_store
+import institutional_data
 
 st.set_page_config(page_title="台灣股票追蹤器", layout="wide")
+
+# Every st.dataframe table gets a small hover-only toolbar (download/search/
+# fullscreen icons) that Streamlit doesn't expose any official parameter to
+# resize -- confirmed via Streamlit's own st.dataframe docs (no toolbar-
+# related argument exists as of the version pinned in requirements.txt).
+# On a touch screen, "hover-only" also means it can be awkward to even make
+# it appear. [data-testid="stElementToolbar"] is Streamlit's actual (but
+# undocumented/internal) DOM hook for this toolbar -- widely used in the
+# Streamlit community for exactly this kind of styling tweak, but it's not
+# a stable public API, so a future Streamlit upgrade could rename it and
+# silently stop this working (harmless if so -- the toolbar just goes back
+# to its small default size, nothing breaks).
+st.markdown(
+    """
+    <style>
+    [data-testid="stElementToolbar"] {
+        opacity: 1 !important;  /* always visible, not just on hover -- hover doesn't exist on touch */
+    }
+    [data-testid="stElementToolbar"] button {
+        min-width: 2.75rem !important;   /* ~44px, the standard minimum touch-target size */
+        min-height: 2.75rem !important;
+    }
+    [data-testid="stElementToolbar"] svg {
+        width: 1.25rem !important;
+        height: 1.25rem !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 def run_and_log(label, fn):
@@ -217,6 +249,12 @@ MARKET_VALUE_COLUMNS_ZH = {
     "MarketValue": "市值（新台幣）",
 }
 
+INSTITUTIONAL_COLUMNS_ZH = {
+    "Date": "日期", "ForeignNet": "外資淨買賣超（股）",
+    "InvestmentTrustNet": "投信淨買賣超（股）", "DealerNet": "自營商淨買賣超（股）",
+    "ThreeInstitutionsNet": "三大法人合計淨買賣超（股）",
+}
+
 # DDM valuation: reordered so the model-estimated prices sit right next to
 # the actual latest price, for an easy side-by-side comparison -- inputs
 # and diagnostics (beta, r, phi, sample sizes) follow after.
@@ -262,16 +300,55 @@ def display_table(df, column_order=None, labels=None):
     return out
 
 
+# Taiwan market color convention is the OPPOSITE of the US/Western one:
+# red (紅) = price up, green (綠) = price down. Getting this backwards on a
+# candlestick chart would silently mislead every reading of it, so it's
+# called out explicitly here rather than left as an unexplained hex pair.
+CANDLESTICK_UP_COLOR = "#d64545"    # red -- 漲
+CANDLESTICK_DOWN_COLOR = "#2e7d32"  # green -- 跌
+
+
+def render_candlestick(df):
+    """df needs Date/Open/High/Low/Close columns already filtered to the
+    desired date range. Renders a candlestick chart -- no return value."""
+    fig = go.Figure(data=[go.Candlestick(
+        x=df["Date"], open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
+        increasing_line_color=CANDLESTICK_UP_COLOR, increasing_fillcolor=CANDLESTICK_UP_COLOR,
+        decreasing_line_color=CANDLESTICK_DOWN_COLOR, decreasing_fillcolor=CANDLESTICK_DOWN_COLOR,
+        name="股價",
+    )])
+    fig.update_layout(
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=10, r=10, t=10, b=10),
+        height=420,
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def render_bar(df, column, label, color="#4c78a8"):
+    """df needs Date and `column` already filtered to the desired date
+    range. Renders a simple bar chart -- used for volume and, on the
+    institutional-investors tab, net buy/sell by investor type."""
+    fig = go.Figure(data=[go.Bar(x=df["Date"], y=df[column], marker_color=color, name=label)])
+    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=200, showlegend=False)
+    st.plotly_chart(fig, use_container_width=True)
+
+
 # --- Login gate --------------------------------------------------------------
 # Simple username/password accounts, handled entirely by user_store.py (see
 # its docstring for the design and trade-offs) -- no external setup needed.
+# A visitor can also browse as a GUEST instead: same features, but nothing
+# about them (no account, no personal watchlist) is ever written to disk --
+# see IS_GUEST below for exactly what that changes.
 
 if "auth_user" not in st.session_state:
     st.session_state["auth_user"] = None
+if "is_guest" not in st.session_state:
+    st.session_state["is_guest"] = False
 
-if st.session_state["auth_user"] is None:
+if st.session_state["auth_user"] is None and not st.session_state["is_guest"]:
     st.title("台灣股票追蹤器")
-    st.write("請先登入，才能查看與管理你自己的追蹤清單。")
+    st.write("請先登入，才能查看與管理你自己的追蹤清單；或者選擇不登入，以訪客身分瀏覽。")
 
     tab_login, tab_signup = st.tabs(["登入", "註冊新帳號"])
 
@@ -299,12 +376,23 @@ if st.session_state["auth_user"] is None:
                     ok, msg = user_store.create_account(new_username, new_password)
                     (st.success if ok else st.error)(msg)
 
+    st.divider()
+    st.caption(
+        "不想建立帳號？可以用訪客身分瀏覽 -- 一樣能查看股價／股利／市值等資料、"
+        "自己組一份暫時的追蹤清單，但這份清單只存在這次瀏覽階段，關閉分頁或登出"
+        "後就會消失，不會留下任何跟你有關的紀錄。"
+    )
+    if st.button("以訪客身分瀏覽"):
+        st.session_state["is_guest"] = True
+        st.rerun()
+
     st.stop()
 
-USER_NAME = st.session_state["auth_user"]
+IS_GUEST = st.session_state["is_guest"]
+USER_NAME = "訪客" if IS_GUEST else st.session_state["auth_user"]
 
 
-# --- Personal watchlist (this logged-in account, this session) --------------
+# --- Personal watchlist (this logged-in account, or this guest session) -----
 
 def _load_personal_codes():
     """A brand-new account (and the "shouldn't normally happen" None
@@ -312,7 +400,11 @@ def _load_personal_codes():
     auto-added default tickers, so a new account never sees any share's
     data until they've actually added one themselves. Every tab below is
     written to handle an empty watchlist gracefully (see NO_WATCHLIST_MSG)
-    rather than assuming at least one ticker."""
+    rather than assuming at least one ticker. A guest session ALWAYS
+    starts empty too, and never reads from user_store.py at all -- there's
+    no account for it to look anything up under."""
+    if IS_GUEST:
+        return []
     return user_store.load_user_codes(USER_NAME) or []
 
 
@@ -321,6 +413,15 @@ if "personal_codes" not in st.session_state:
 
 
 def _save_personal_codes():
+    """No-op for a guest session -- this is the one thing that actually
+    delivers "don't store any information for them": a guest's watchlist
+    only ever lives in st.session_state (this browser tab's memory for
+    this session), and this function is the only place anything about a
+    personal watchlist gets written to disk, so simply not calling
+    user_store.save_user_codes() here is sufficient. Nothing else needs a
+    guest-specific branch."""
+    if IS_GUEST:
+        return
     user_store.save_user_codes(USER_NAME, st.session_state["personal_codes"])
 
 
@@ -340,21 +441,36 @@ def watchlist_name(code):
 # --- Sidebar: account ---------------------------------------------------
 
 st.sidebar.title("帳號")
-st.sidebar.write(f"👤 {USER_NAME}")
-if st.sidebar.button("登出"):
-    st.session_state["auth_user"] = None
-    st.session_state.pop("personal_codes", None)
-    st.rerun()
+if IS_GUEST:
+    st.sidebar.write(f"👤 {USER_NAME}")
+    st.sidebar.caption("訪客模式：這份追蹤清單只存在這次瀏覽階段，不會被儲存。")
+    if st.sidebar.button("結束訪客模式"):
+        st.session_state["is_guest"] = False
+        st.session_state.pop("personal_codes", None)
+        st.rerun()
+else:
+    st.sidebar.write(f"👤 {USER_NAME}")
+    if st.sidebar.button("登出"):
+        st.session_state["auth_user"] = None
+        st.session_state.pop("personal_codes", None)
+        st.rerun()
 st.sidebar.divider()
 
 # --- Sidebar: manage personal watchlist ----------------------------------
 
 st.sidebar.title("我的追蹤清單")
-st.sidebar.caption(
-    "只有你自己看得到、改得到的清單，登入後會自動儲存，換裝置登入也看得到。"
-    "新增一檔股票時，如果這檔股票還沒有人抓過資料，會一併加進共用的抓取清單"
-    "（下面「更新資料」抓的就是這份共用清單），所以第一次加入後記得按抓取按鈕。"
-)
+if IS_GUEST:
+    st.sidebar.caption(
+        "訪客模式下這份清單只存在這次瀏覽階段，不會被儲存，也換不到別台裝置。"
+        "可以自由挑選清單中已經有在追蹤的股票；但新增全新代號（全站第一次出現）"
+        "需要先登入帳號才能做。"
+    )
+else:
+    st.sidebar.caption(
+        "只有你自己看得到、改得到的清單，登入後會自動儲存，換裝置登入也看得到。"
+        "新增一檔股票時，如果這檔股票還沒有人抓過資料，會一併加進共用的抓取清單"
+        "（下面「更新資料」抓的就是這份共用清單），所以第一次加入後記得按抓取按鈕。"
+    )
 
 if not personal_watchlist():
     st.sidebar.caption("（目前是空的，用下面的表單新增你想追蹤的第一檔股票）")
@@ -376,12 +492,21 @@ with st.sidebar.form("add_ticker_form", clear_on_submit=True):
     new_name_en = st.text_input("英文名稱（選填）")
     if st.form_submit_button("加入我的清單"):
         code = new_code.strip()
+        is_new_to_app = not any(s["code"] == code for s in config.WATCHLIST)
         if not code:
             st.sidebar.error("請先輸入股票代號。")
         elif code in st.session_state["personal_codes"]:
             st.sidebar.warning(f"{code} 已經在你的追蹤清單中。")
+        elif IS_GUEST and is_new_to_app:
+            # Registering a ticker the app has never seen before is a
+            # SHARED, persistent change (data/watchlist.json, seen by
+            # every future visitor) -- deliberately not something an
+            # anonymous guest session can trigger. A guest can still add
+            # any ticker already known to the app to their own temporary
+            # list, just not introduce a brand new one.
+            st.sidebar.error(f"{code} 是全新的股票代號，訪客模式無法新增，請先登入帳號。")
         else:
-            if not any(s["code"] == code for s in config.WATCHLIST):
+            if is_new_to_app:
                 # Brand new to the whole app -- add it to the shared
                 # registry too, so the Fetch buttons below start pulling
                 # data for it. Other users' personal lists are untouched.
@@ -431,6 +556,16 @@ if st.sidebar.button("抓取流通股數／市值", use_container_width=True):
     run_and_log("抓取流通股數／市值 (market_value_data.py)", market_value_data.run)
 
 st.sidebar.divider()
+st.sidebar.caption(
+    "三大法人買賣超資料來源（T86）跟上面不同：每次連線只能拿到「一天、全部股票」的"
+    "資料，回溯歷史要一天一天抓，所以速度比較慢，特別獨立成一個按鈕，不包在"
+    "「一鍵抓取全部資料」裡面。預設只回溯 90 天（可在 config.py 的 "
+    "INSTITUTIONAL_HISTORY_DAYS 調整），之後重複執行只會補齊缺少的日期。"
+)
+if st.sidebar.button("抓取三大法人買賣超", use_container_width=True):
+    run_and_log("抓取三大法人買賣超 (institutional_data.py)", institutional_data.run)
+
+st.sidebar.divider()
 st.sidebar.caption("以下兩個按鈕只會重新計算已存在的本機資料，速度快，不會連線網路。")
 if st.sidebar.button("重新計算股利預測", use_container_width=True):
     run_and_log("重新計算股利預測 (predict_dividends.py)", predict_dividends.run)
@@ -457,8 +592,8 @@ if not my_watchlist:
 else:
     st.caption("我的追蹤清單：" + "、".join(f"{s['code']} {s['name']}" for s in my_watchlist))
 
-tab_overview, tab_prices, tab_dividends, tab_market_value, tab_ddm, tab_news = st.tabs(
-    ["總覽", "股價", "股利", "市值", "DDM 估值", "新聞"]
+tab_overview, tab_prices, tab_institutional, tab_dividends, tab_market_value, tab_ddm, tab_news = st.tabs(
+    ["總覽", "股價", "三大法人", "股利", "市值", "DDM 估值", "新聞"]
 )
 
 # --- Overview ------------------------------------------------------------------
@@ -539,11 +674,80 @@ with tab_prices:
             if filtered.empty:
                 st.info("這個區間內沒有股價資料，請試試其他區間。")
             else:
-                st.line_chart(filtered.set_index("Date")["Close"])
+                render_candlestick(filtered)
+                st.caption("成交量（整體成交股數）")
+                render_bar(filtered, "Volume", "成交量")
                 st.dataframe(
                     display_table(filtered.sort_values("Date", ascending=False), labels=PRICE_COLUMNS_ZH),
                     use_container_width=True, hide_index=True,
                 )
+
+# --- Institutional investors (三大法人) ---------------------------------------
+
+with tab_institutional:
+    if not my_watchlist:
+        st.info(NO_WATCHLIST_MSG)
+    else:
+        codes = [s["code"] for s in my_watchlist]
+        inst_picked = st.selectbox(
+            "選擇股票代號", codes, format_func=lambda c: f"{c} {watchlist_name(c)}",
+            key="institutional_picked",
+        )
+        inst = load_csv(os.path.join(config.DATA_DIR, "institutional", f"{inst_picked}.csv"))
+        if inst is None:
+            st.info("尚無三大法人買賣超資料 -- 請在側邊欄點擊「抓取三大法人買賣超」。")
+        else:
+            inst["Date"] = pd.to_datetime(inst["Date"])
+            inst = inst.sort_values("Date")
+            min_date = inst["Date"].min().date()
+            max_date = inst["Date"].max().date()
+
+            RANGE_PRESET_DAYS = {"1週": 7, "1個月": 30, "3個月": 91, "6個月": 182, "1年": 365}
+            range_options = list(RANGE_PRESET_DAYS) + ["全部", "自訂..."]
+            range_choice = st.radio(
+                "顯示區間", range_options, index=range_options.index("全部"),
+                horizontal=True, key=f"inst_range_{inst_picked}",
+            )
+
+            if range_choice == "自訂...":
+                col_start, col_end = st.columns(2)
+                start_date = col_start.date_input(
+                    "起始日期", value=min_date, min_value=min_date, max_value=max_date,
+                    key=f"inst_start_{inst_picked}",
+                )
+                end_date = col_end.date_input(
+                    "結束日期", value=max_date, min_value=min_date, max_value=max_date,
+                    key=f"inst_end_{inst_picked}",
+                )
+                if start_date > end_date:
+                    st.warning("起始日期不能晚於結束日期，已自動交換兩者。")
+                    start_date, end_date = end_date, start_date
+            elif range_choice == "全部":
+                start_date, end_date = min_date, max_date
+            else:
+                end_date = max_date
+                start_date = max(min_date, max_date - pd.Timedelta(days=RANGE_PRESET_DAYS[range_choice]))
+
+            filtered = inst[(inst["Date"].dt.date >= start_date) & (inst["Date"].dt.date <= end_date)]
+            if filtered.empty:
+                st.info("這個區間內沒有三大法人資料，請試試其他區間，或在側邊欄重新抓取。")
+            else:
+                st.caption("外資淨買賣超（股）-- 正值＝淨買超，負值＝淨賣超")
+                render_bar(filtered, "ForeignNet", "外資淨買賣超", color="#e45756")
+                st.caption("投信淨買賣超（股）")
+                render_bar(filtered, "InvestmentTrustNet", "投信淨買賣超", color="#4c78a8")
+                st.caption("自營商淨買賣超（股）")
+                render_bar(filtered, "DealerNet", "自營商淨買賣超", color="#54a24b")
+                st.dataframe(
+                    display_table(filtered.sort_values("Date", ascending=False), labels=INSTITUTIONAL_COLUMNS_ZH),
+                    use_container_width=True, hide_index=True,
+                )
+            st.caption(
+                "資料來源為證交所三大法人買賣超日報（T86）。外資＝外陸資（不含外資自營商）"
+                "＋外資自營商；投信、自營商為證交所公告的官方合計數字。預設只回溯最近 90 天"
+                "（config.py 的 INSTITUTIONAL_HISTORY_DAYS 可調整），第一次使用請先在側邊欄"
+                "點擊「抓取三大法人買賣超」。"
+            )
 
 # --- Dividends -------------------------------------------------------------------
 

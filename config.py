@@ -85,6 +85,17 @@ PRICE_HISTORY_MONTHS = 36
 # request too fast, so keep this conservative (>=1.5s recommended).
 REQUEST_DELAY_SECONDS = 1.5
 
+# How many calendar days of 三大法人 (foreign/investment-trust/dealer) net
+# buy-sell history to backfill, used by institutional_data.py. Kept much
+# smaller than PRICE_HISTORY_MONTHS on purpose: that report's TWSE
+# endpoint (T86) returns EVERY stock for ONE day per call, so a full
+# backfill costs roughly one request PER TRADING DAY, not per ticker --
+# much more expensive than price_data.py's per-ticker-per-month calls.
+# Raise this if you want deeper history and don't mind the longer first
+# run (subsequent runs only fetch days missing for at least one watchlist
+# ticker, same incremental idea as PRICE_HISTORY_MONTHS).
+INSTITUTIONAL_HISTORY_DAYS = 90
+
 # How many news headlines to keep per company per run.
 NEWS_ITEMS_PER_COMPANY = 15
 
