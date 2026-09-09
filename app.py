@@ -32,6 +32,9 @@ just say so and point you at the matching sidebar button.
 import contextlib
 import io
 import os
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import streamlit as st
@@ -68,10 +71,91 @@ def run_and_log(label, fn):
             st.code(log)
 
 
+class _ThreadCapturingStdout:
+    """Lets several run() functions run concurrently in different threads
+    while still capturing each one's print() output separately.
+    contextlib.redirect_stdout alone can't do this -- it swaps out
+    sys.stdout globally, so overlapping redirections from different
+    threads would stomp on each other and mix their output together. This
+    object replaces sys.stdout exactly once; each thread that calls
+    .capture(buf) then gets its OWN writes routed to its own buffer, while
+    every other thread (and the main thread, until it captures too) keeps
+    writing straight through to the real stdout."""
+
+    def __init__(self, real_stdout):
+        self._real = real_stdout
+        self._local = threading.local()
+
+    def write(self, s):
+        (getattr(self._local, "buf", None) or self._real).write(s)
+
+    def flush(self):
+        (getattr(self._local, "buf", None) or self._real).flush()
+
+    def isatty(self):
+        return False
+
+    def capture(self, buf):
+        self._local.buf = buf
+
+    def release(self):
+        self._local.buf = None
+
+
+if not isinstance(sys.stdout, _ThreadCapturingStdout):
+    sys.stdout = _ThreadCapturingStdout(sys.stdout)
+
+
+def _run_capturing(fn):
+    buf = io.StringIO()
+    sys.stdout.capture(buf)
+    try:
+        fn()
+        return buf.getvalue(), None
+    except Exception as e:
+        return buf.getvalue(), str(e)
+    finally:
+        sys.stdout.release()
+
+
+def run_parallel_and_log(jobs):
+    """jobs: list of (label, fn). Runs every fn() in its own thread AT THE
+    SAME TIME, then shows each one's result once all of them are done.
+    Safe to run together because price_data.py, dividend_data.py, and
+    news_data.py each talk to a DIFFERENT external service (TWSE's legacy
+    price report, yfinance/Yahoo, Google News) -- running them concurrently
+    doesn't send requests any faster to any single one of them
+    (REQUEST_DELAY_SECONDS still throttles each script's own calls exactly
+    as before), it just overlaps the waiting time instead of adding it up.
+    Wall-clock time drops to roughly whichever one is slowest -- usually
+    price history on a first run -- instead of the sum of all of them."""
+    names = "、".join(label for label, _ in jobs)
+    with st.spinner(f"正在同時抓取「{names}」-- 這樣比一個一個抓還快，仍需要一點時間..."):
+        with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
+            futures = {ex.submit(_run_capturing, fn): label for label, fn in jobs}
+            results = {futures[f]: f.result() for f in as_completed(futures)}
+    for label, _ in jobs:
+        log, error = results[label]
+        if error:
+            st.error(f"「{label}」執行失敗：{error}")
+        else:
+            st.success(f"「{label}」執行完成。")
+        if log:
+            with st.expander(f"「{label}」執行紀錄", expanded=False):
+                st.code(log)
+
+
 def load_csv(path):
     if not os.path.exists(path):
         return None
-    df = pd.read_csv(path, encoding="utf-8-sig")
+    # dtype={"code": str}: a ticker code like "0050" or "00878" is all
+    # digits, so pandas would otherwise infer it as an integer and silently
+    # drop the leading zeros (0050 -> 50, 00878 -> 878) -- forcing it to
+    # stay a string keeps it exactly as printed everywhere else (the
+    # sidebar, the CSV files themselves, the file names). Harmless to pass
+    # for CSVs that don't have a "code" column at all (e.g. the per-ticker
+    # price/market-value files) -- pandas just ignores the unused key.
+    df = pd.read_csv(path, encoding="utf-8-sig", dtype={"code": str})
     return df if not df.empty else None
 
 
@@ -211,11 +295,16 @@ st.sidebar.caption(
     "重複點擊。"
 )
 
-st.sidebar.caption("一次抓取全部資料（依序執行下面四項，耗時最長，但只要點一次）：")
+st.sidebar.caption(
+    "一次抓取全部資料（股價／股利／新聞會同時進行，比一個一個點快很多；"
+    "流通股數／市值需要用到當天的股價，所以最後才抓）："
+)
 if st.sidebar.button("🔄 一鍵抓取全部資料", use_container_width=True, type="primary"):
-    run_and_log("抓取股價 (price_data.py)", price_data.run)
-    run_and_log("抓取股利 (dividend_data.py)", dividend_data.run)
-    run_and_log("抓取新聞 (news_data.py)", news_data.run)
+    run_parallel_and_log([
+        ("抓取股價 (price_data.py)", price_data.run),
+        ("抓取股利 (dividend_data.py)", dividend_data.run),
+        ("抓取新聞 (news_data.py)", news_data.run),
+    ])
     run_and_log("抓取流通股數／市值 (market_value_data.py)", market_value_data.run)
     st.sidebar.success("全部資料抓取完成！")
 

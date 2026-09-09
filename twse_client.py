@@ -12,6 +12,17 @@ Two families of endpoint are used elsewhere in this project:
 Both are free and require no authentication, but TWSE will temporarily
 block an IP that requests too quickly, so every call here is throttled
 and retried with backoff.
+
+Uses a single shared requests.Session() (module-level, below) rather than
+a fresh connection per call -- TCP/TLS handshakes are reused across the
+many sequential calls price_data.py makes to the same TWSE host, which
+shaves a small but real amount of time off a full price-history backfill
+without changing the request rate TWSE actually sees (REQUEST_DELAY_SECONDS
+still applies exactly as before). This is safe under the concurrent
+fetching main.py/app.py can now do too (see their docstrings) since
+price_data.py is the only caller of this module that ever runs as part of
+a concurrent job group -- there's no concurrent use of this session from
+multiple threads at once.
 """
 
 import time
@@ -29,6 +40,9 @@ HEADERS = {
     "Accept": "application/json",
 }
 
+_session = requests.Session()
+_session.headers.update(HEADERS)
+
 
 def get_json(url, params=None, max_retries=4, timeout=20):
     """GET a URL and return parsed JSON, or None if it never succeeds.
@@ -40,7 +54,7 @@ def get_json(url, params=None, max_retries=4, timeout=20):
     last_error = None
     for attempt in range(1, max_retries + 1):
         try:
-            resp = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
+            resp = _session.get(url, params=params, timeout=timeout)
             if resp.status_code == 200:
                 try:
                     data = resp.json()
