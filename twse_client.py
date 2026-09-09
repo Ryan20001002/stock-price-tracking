@@ -38,6 +38,12 @@ HEADERS = {
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept": "application/json",
+    # Some TWSE report endpoints (T86 in particular, added 2026-09-09) are
+    # pickier than the STOCK_DAY endpoint and appear to expect a same-site
+    # Referer, same as a real browser loading the report page would send --
+    # harmless to include on every call, even the ones that already worked
+    # fine without it.
+    "Referer": "https://www.twse.com.tw/zh/trading/fund/T86.html",
 }
 
 _session = requests.Session()

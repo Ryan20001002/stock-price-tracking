@@ -148,10 +148,15 @@ def run():
         return
 
     existing = {code: _load_existing(code) for code in codes}
+    watchlist_codes = {c.strip() for c in codes}
     target_dates = _recent_calendar_dates(INSTITUTIONAL_HISTORY_DAYS)
 
-    fetched_days = 0
-    skipped_days = 0
+    fetched_days = 0       # got a stat=="OK" response with at least one watchlist row matched
+    skipped_days = 0       # every watchlist ticker already had this date on file, no request made
+    no_trading_days = 0    # request succeeded but TWSE says stat != "OK" (weekend/holiday/not published yet)
+    request_failed_days = 0  # get_json gave up after retries (network issue / TWSE blocking us)
+    unmatched_days = 0     # stat == "OK" but none of OUR watchlist codes appeared in that day's data
+
     for iso_date in target_dates:
         if all(iso_date in existing[code] for code in codes):
             skipped_days += 1
@@ -159,7 +164,11 @@ def run():
 
         date_param = iso_date.replace("-", "")
         payload = get_json(T86_URL, params={"date": date_param, "selectType": "ALL", "response": "json"})
-        if not payload or payload.get("stat") != "OK":
+        if payload is None:
+            request_failed_days += 1
+            continue  # get_json already printed a warning per retry; move on to the next date
+        if payload.get("stat") != "OK":
+            no_trading_days += 1
             continue  # weekend, holiday, or no data published yet for today
 
         fields = payload.get("fields") or []
@@ -183,11 +192,12 @@ def run():
         if dealer_arm_field:
             idx["dealer_arm"] = fields.index(dealer_arm_field)
 
-        watchlist_codes = set(codes)
+        matched_this_day = 0
         for row in payload.get("data", []):
             code = str(row[idx["code"]]).strip()
             if code not in watchlist_codes:
                 continue
+            matched_this_day += 1
             existing[code][iso_date] = {
                 "Date": iso_date,
                 "ForeignNet": _extract_foreign_net(row, idx),
@@ -195,14 +205,40 @@ def run():
                 "DealerNet": _num(row[fields.index(dealer_field)]) if dealer_field else None,
                 "ThreeInstitutionsNet": _num(row[fields.index(three_field)]) if three_field else None,
             }
-        fetched_days += 1
+        if matched_this_day:
+            fetched_days += 1
+        else:
+            unmatched_days += 1
+            print(f"  [warn] {iso_date}: TWSE returned {len(payload.get('data', []))} stocks "
+                  f"but none matched our watchlist codes {sorted(watchlist_codes)}")
 
     for code in codes:
         _write_csv(code, existing[code])
 
-    print(f"[institutional] {fetched_days} day(s) fetched, {skipped_days} already on file for every ticker")
+    print(f"[institutional] {fetched_days} day(s) fetched, {skipped_days} already on file for every ticker, "
+          f"{no_trading_days} non-trading day(s), {request_failed_days} request(s) failed, "
+          f"{unmatched_days} day(s) with no watchlist match")
     for code in codes:
         print(f"  -> {code}: {len(existing[code])} days saved")
+
+    total_rows_saved = sum(len(v) for v in existing.values())
+    if total_rows_saved == 0 and target_dates:
+        if request_failed_days > 0:
+            raise RuntimeError(
+                f"TWSE 完全沒有回應任何一天的三大法人資料（{request_failed_days} 次請求全部失敗）-- "
+                "很可能是暫時被 TWSE 限制請求頻率或網路不通，請稍等幾分鐘後再試一次。"
+            )
+        if unmatched_days > 0:
+            raise RuntimeError(
+                "TWSE 有回應資料，但每一天的資料裡都找不到你追蹤清單中的股票代號 -- "
+                "請確認 config.py 的 WATCHLIST／data/watchlist.json 裡的代號跟 TWSE 網站上的"
+                "代號完全一致（例如是否多了空白、大小寫，或代號本身在 T86 這份報表中沒有揭露）。"
+                "上面的 [warn] 訊息有列出 TWSE 當天實際回傳了哪些代號，可以比對看看。"
+            )
+        raise RuntimeError(
+            "沒有抓到任何三大法人資料，但也沒有偵測到請求失敗或代號不符 -- 這種情況不預期會發生，"
+            "請把這顆按鈕下方「執行紀錄」完整內容回報，方便進一步排查。"
+        )
 
 
 if __name__ == "__main__":

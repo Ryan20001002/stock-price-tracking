@@ -534,7 +534,10 @@ st.sidebar.caption(
 
 st.sidebar.caption(
     "一次抓取全部資料（股價／股利／新聞會同時進行，比一個一個點快很多；"
-    "流通股數／市值需要用到當天的股價，所以最後才抓）："
+    "流通股數／市值需要用到當天的股價，所以接著抓；三大法人買賣超的資料來源"
+    "每次連線只能拿到「一天、全部股票」的資料，回溯歷史要一天一天抓，所以"
+    "最後才抓、也最慢，預設只回溯 90 天，可在 config.py 的 "
+    "INSTITUTIONAL_HISTORY_DAYS 調整）："
 )
 if st.sidebar.button("🔄 一鍵抓取全部資料", use_container_width=True, type="primary"):
     run_parallel_and_log([
@@ -543,6 +546,7 @@ if st.sidebar.button("🔄 一鍵抓取全部資料", use_container_width=True, 
         ("抓取新聞 (news_data.py)", news_data.run),
     ])
     run_and_log("抓取流通股數／市值 (market_value_data.py)", market_value_data.run)
+    run_and_log("抓取三大法人買賣超 (institutional_data.py)", institutional_data.run)
     st.sidebar.success("全部資料抓取完成！")
 
 st.sidebar.caption("或者只更新其中一項：")
@@ -554,14 +558,6 @@ if st.sidebar.button("抓取新聞", use_container_width=True):
     run_and_log("抓取新聞 (news_data.py)", news_data.run)
 if st.sidebar.button("抓取流通股數／市值", use_container_width=True):
     run_and_log("抓取流通股數／市值 (market_value_data.py)", market_value_data.run)
-
-st.sidebar.divider()
-st.sidebar.caption(
-    "三大法人買賣超資料來源（T86）跟上面不同：每次連線只能拿到「一天、全部股票」的"
-    "資料，回溯歷史要一天一天抓，所以速度比較慢，特別獨立成一個按鈕，不包在"
-    "「一鍵抓取全部資料」裡面。預設只回溯 90 天（可在 config.py 的 "
-    "INSTITUTIONAL_HISTORY_DAYS 調整），之後重複執行只會補齊缺少的日期。"
-)
 if st.sidebar.button("抓取三大法人買賣超", use_container_width=True):
     run_and_log("抓取三大法人買賣超 (institutional_data.py)", institutional_data.run)
 
