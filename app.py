@@ -23,23 +23,25 @@ depend on those exact names.
 
 Login and personal watchlists
 ------------------------------
-Visitors sign in with Google (st.login()). Two DIFFERENT lists exist,
-deliberately kept separate:
+Visitors sign in with a simple username/password account (created from
+the same login screen). Two DIFFERENT lists exist, deliberately kept
+separate:
 
 - config.WATCHLIST -- the shared/global registry every fetch script reads
   (price_data.py, dividend_data.py, etc.). Adding a ticker here means
   "start collecting data for this ticker, for everyone." Still backed by
   data/watchlist.json exactly as before login existed.
-- Each logged-in user's PERSONAL watchlist -- just which of the tickers
-  already in the shared registry THEY want to see, stored per-user in a
-  private Google Sheet via user_store.py (local files don't survive
-  Streamlit Community Cloud restarts, see that module's docstring).
-  Every display tab below shows only the current session's personal
+- Each logged-in account's PERSONAL watchlist -- just which of the
+  tickers already in the shared registry THEY want to see, stored
+  per-account in data/users.json via user_store.py (see that module's
+  docstring for the design and its trade-offs, especially around
+  Streamlit Community Cloud's storage not surviving a restart). Every
+  display tab below shows only the current session's personal
   watchlist, resolved against config.WATCHLIST for each ticker's name.
 
-This needs a one-time manual setup (a Google OAuth client + a Google
-Sheet + service account) that this file can't do by itself -- see the
-README's "Login and personal watchlists" section.
+No external setup is needed for this -- accounts and passwords are
+created and checked entirely by user_store.py, with no Google Cloud
+project, OAuth client, or service account involved.
 
 Usage:
     streamlit run app.py
@@ -261,44 +263,54 @@ def display_table(df, column_order=None, labels=None):
 
 
 # --- Login gate --------------------------------------------------------------
-# st.user/st.login/st.logout need an [auth] section in .streamlit/secrets.toml
-# (a Google OAuth client) -- see the README. Without it, st.login() itself
-# raises, so this is wrapped to fail with a clear Mandarin message instead of
-# a raw Python traceback if that setup hasn't been done yet.
+# Simple username/password accounts, handled entirely by user_store.py (see
+# its docstring for the design and trade-offs) -- no external setup needed.
 
-try:
-    _logged_in = st.user.is_logged_in
-except Exception:
+if "auth_user" not in st.session_state:
+    st.session_state["auth_user"] = None
+
+if st.session_state["auth_user"] is None:
     st.title("台灣股票追蹤器")
-    st.error(
-        "登入功能尚未設定完成（缺少 Google 登入設定）。開發者需要先依照 README 的 "
-        "「Login and personal watchlists」章節，設定 Google OAuth 並建立 "
-        ".streamlit/secrets.toml，這個網頁才能使用。"
-    )
+    st.write("請先登入，才能查看與管理你自己的追蹤清單。")
+
+    tab_login, tab_signup = st.tabs(["登入", "註冊新帳號"])
+
+    with tab_login:
+        with st.form("login_form"):
+            login_username = st.text_input("使用者名稱")
+            login_password = st.text_input("密碼", type="password")
+            if st.form_submit_button("登入", type="primary"):
+                if user_store.verify_login(login_username.strip(), login_password):
+                    st.session_state["auth_user"] = login_username.strip()
+                    st.rerun()
+                else:
+                    st.error("使用者名稱或密碼錯誤。")
+
+    with tab_signup:
+        st.caption("這是很單純的使用者名稱／密碼帳號，沒有 email 驗證或忘記密碼功能，適合自己或小群體使用。")
+        with st.form("signup_form"):
+            new_username = st.text_input("選擇使用者名稱")
+            new_password = st.text_input("設定密碼", type="password")
+            new_password_confirm = st.text_input("再輸入一次密碼", type="password")
+            if st.form_submit_button("建立帳號"):
+                if new_password != new_password_confirm:
+                    st.error("兩次輸入的密碼不一致。")
+                else:
+                    ok, msg = user_store.create_account(new_username, new_password)
+                    (st.success if ok else st.error)(msg)
+
     st.stop()
 
-if not _logged_in:
-    st.title("台灣股票追蹤器")
-    st.write("請先使用 Google 帳號登入，才能查看與管理你自己的追蹤清單。")
-    st.button("使用 Google 帳號登入", on_click=st.login, type="primary")
-    st.stop()
-
-USER_EMAIL = st.user.email
-USER_NAME = getattr(st.user, "name", None) or USER_EMAIL
+USER_NAME = st.session_state["auth_user"]
 
 
-# --- Personal watchlist (this logged-in user, this session) -----------------
+# --- Personal watchlist (this logged-in account, this session) --------------
 
 def _load_personal_codes():
-    try:
-        saved = user_store.load_user_codes(USER_EMAIL)
-    except Exception as e:
-        st.sidebar.warning(f"無法讀取你已儲存的追蹤清單，暫時使用預設清單（錯誤：{e}）。")
-        saved = None
+    saved = user_store.load_user_codes(USER_NAME)
     if saved is None:
-        # First time this account has logged in -- start from whatever's
-        # currently in the shared registry, same as what everyone saw
-        # before login existed.
+        # Shouldn't normally happen post-login, but fall back to the
+        # shared registry rather than crashing if it ever does.
         saved = [s["code"] for s in config.WATCHLIST]
     return saved
 
@@ -308,10 +320,7 @@ if "personal_codes" not in st.session_state:
 
 
 def _save_personal_codes():
-    try:
-        user_store.save_user_codes(USER_EMAIL, st.session_state["personal_codes"])
-    except Exception as e:
-        st.sidebar.warning(f"追蹤清單暫時無法儲存到雲端（錯誤：{e}），但這個瀏覽階段仍可正常使用。")
+    user_store.save_user_codes(USER_NAME, st.session_state["personal_codes"])
 
 
 def personal_watchlist():
@@ -331,8 +340,10 @@ def watchlist_name(code):
 
 st.sidebar.title("帳號")
 st.sidebar.write(f"👤 {USER_NAME}")
-st.sidebar.caption(USER_EMAIL)
-st.sidebar.button("登出", on_click=st.logout)
+if st.sidebar.button("登出"):
+    st.session_state["auth_user"] = None
+    st.session_state.pop("personal_codes", None)
+    st.rerun()
 st.sidebar.divider()
 
 # --- Sidebar: manage personal watchlist ----------------------------------

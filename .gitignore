@@ -22,13 +22,8 @@ Claude outputs/
 # time. Delete this line (or move it below a `data/.gitkeep` exception)
 # if you'd rather snapshot your data in the repo too -- there's nothing
 # wrong with that for a dissertation project where reproducibility of a
-# specific dataset matters.
+# specific dataset matters. This also covers data/users.json (login
+# accounts + personal watchlists, see user_store.py) -- IMPORTANT that
+# this one in particular never gets committed, since it holds password
+# hashes, even though they're salted/hashed rather than plain text.
 data/
-
-# CRITICAL: never commit this. Holds your Google OAuth client secret and
-# your Google Sheets service account's private key in plain text (see
-# README's "Login and personal watchlists" section) -- anyone who reads
-# this file from a public repo could sign in as your app and read/write
-# your Google Sheet. Streamlit Community Cloud gets these same values
-# pasted into its own "Secrets" panel instead, never from this file.
-.streamlit/secrets.toml

@@ -71,10 +71,9 @@ pip install -r requirements.txt
 
 Requires Python 3.8+. Dependencies: `requests`, `yfinance` (which pulls in
 `pandas` as well), `numpy` (used directly by `ddm_valuation.py`'s
-regression/AR(1) growth models), `streamlit` (the webpage), `Authlib`
-(Google sign-in, via Streamlit's built-in `st.login()`), and `gspread`
-(reads/writes the private Google Sheet each account's personal watchlist
-is stored in -- see "Login and personal watchlists" below).
+regression/AR(1) growth models), and `streamlit` (the webpage, including
+its simple built-in username/password login -- see "Login and personal
+watchlists" below).
 
 ## Usage
 
@@ -122,13 +121,13 @@ streamlit run app.py
 
 Run this from the project folder, same as the commands above -- it opens
 a dashboard in your browser (usually `http://localhost:8501`, opened for
-you automatically). You'll be asked to sign in with Google first (see
-"Login and personal watchlists" below -- this needs a one-time setup
-before it works at all), then you get a tab per data source (Prices,
-Dividends, Market value, DDM valuation, News) plus an Overview tab with
-quick per-ticker metrics, all scoped to your own personal watchlist. The
-sidebar has a "我的追蹤清單" section for adding/removing tickers from your
-own list -- see "Editing the watchlist" below.
+you automatically). You'll be asked to log in first, or create an account
+if you don't have one yet (see "Login and personal watchlists" below --
+no setup needed, it just works), then you get a tab per data source
+(Prices, Dividends, Market value, DDM valuation, News) plus an Overview
+tab with quick per-ticker metrics, all scoped to your own personal
+watchlist. The sidebar has a "我的追蹤清單" section for adding/removing
+tickers from your own list -- see "Editing the watchlist" below.
 
 `app.py` doesn't contain any data-fetching or calculation logic of its
 own -- it only reads whatever's already in `data/*.csv` and displays it,
@@ -161,13 +160,11 @@ servers the same way they are from your own machine -- rate limits and
 network access can behave differently on a hosted service, so the first
 live "Fetch" click there is worth watching closely.
 
-Once you know your deployed URL, two follow-ups from "Login and personal
-watchlists" below: add `https://your-app-name.streamlit.app/oauth2callback`
-as a second authorized redirect URI on your Google OAuth client (you'll
-still have the `localhost` one from local development), and paste your
-`secrets.toml` values into that app's own Settings → Secrets on Streamlit
-Community Cloud (with `redirect_uri` changed to match) -- never commit
-`secrets.toml` itself to get it there.
+**One thing to know about login on Streamlit Community Cloud specifically:**
+accounts (and personal watchlists) are stored in `data/users.json`, the
+same local file as everything else under `data/` -- see "Login and
+personal watchlists" below for what that means in practice (accounts
+don't survive the app "sleeping" and waking back up).
 
 ## Editing the watchlist
 
@@ -183,8 +180,8 @@ personal watchlists" below for the full reasoning:
   you want to change the very-first-run default.
 - **Your personal watchlist** — which of the tickers already in that
   shared registry *you* want to see, set from `app.py`'s "我的追蹤清單"
-  sidebar section after logging in. This is per-Google-account, not
-  per-file — see the next section.
+  sidebar section after logging in. This is per-account, not per-file —
+  see the next section.
 
 In practice you mostly only interact with the second one: the sidebar's
 add-ticker form handles both automatically — if the ticker you're adding
@@ -208,71 +205,50 @@ Other knobs in `config.py`:
 
 ## Login and personal watchlists
 
-The webpage requires signing in with a Google account before showing
-anything. Two lists exist and are kept deliberately separate:
+The webpage requires logging in before showing anything — a simple
+built-in username/password account, created right there on the login
+screen (a "註冊新帳號" tab next to "登入"). No Google account, no OAuth,
+no external setup of any kind — it works the moment you run `streamlit
+run app.py`. Two lists exist and are kept deliberately separate:
 
 - The **shared/global registry** (`config.WATCHLIST`, above) — which
   tickers the app collects data for at all. Shared across everyone, since
   there's no reason to fetch the same TWSE/yfinance data twice for
   different people.
-- Each signed-in Google account's own **personal watchlist** — which of
-  those tickers *that person* wants to see. Every tab (Overview, Prices,
-  Dividends, Market value, DDM valuation, News) only shows this list, not
-  the full shared registry. Stored per-account in a private Google Sheet
-  (via `user_store.py`), not a local file — local files don't survive a
-  restart on Streamlit Community Cloud (see "Putting this online" above),
-  so a Google Sheet is used instead as a small, free, always-on place for
-  these per-person records to actually persist once deployed.
+- Each account's own **personal watchlist** — which of those tickers
+  *that account* wants to see. Every tab (Overview, Prices, Dividends,
+  Market value, DDM valuation, News) only shows this list, not the full
+  shared registry.
 
-This needs a one-time setup outside the code, in two parts. Both are free
-and only need doing once, whether you run this locally, on Streamlit
-Community Cloud, or both (Community Cloud just needs its *own* copy of
-the same secrets, pasted into its Secrets settings instead of a file).
+Accounts, password hashes, and personal watchlists all live in one local
+file, `data/users.json` (via `user_store.py` — see its docstring for the
+full design and trade-offs). A few things worth knowing:
 
-**Part 1 — Google sign-in (OAuth client):**
+- **Passwords aren't stored in plain text.** Each account gets its own
+  random salt, and only a hash of the password is saved — but this is a
+  simple, non-audited implementation, not a vetted auth library, so
+  don't reuse a password here that matters elsewhere.
+- **There's no identity verification.** Anyone who knows the app's URL
+  can register any username they like — fine for a dissertation project
+  used by yourself and a few known people, not meant as a public-facing
+  login system.
+- **No email verification or password reset.** Losing a password means
+  making a new account (or manually editing `data/users.json`, which is
+  plain JSON).
+- **On Streamlit Community Cloud specifically:** `data/users.json` is a
+  local file, same as every CSV under `data/` — it does **not** survive
+  the app "sleeping" after inactivity and waking back up, or a redeploy
+  (see "Putting this online" above). That means accounts created there
+  can disappear and need to be recreated. Running locally, this file just
+  persists normally like any other file on disk. If accounts need to
+  survive Community Cloud restarts reliably, that would mean moving this
+  storage to an external service later (e.g. a small hosted database) —
+  not something the current design does.
 
-1. Go to the [Google Auth Platform](https://console.cloud.google.com/auth/overview)
-   and create/select a Google Cloud project.
-2. Under **Branding**, fill in an app name and save.
-3. Under **Audience** → **Test users**, add the Google account(s) that
-   should be able to log in (while the app is in "Testing" status, only
-   these accounts can sign in — fine for a dissertation project with a
-   handful of known users).
-4. Under **Clients**, create a new client: type **Web application**,
-   skip "Authorized JavaScript origins," and under **Authorized redirect
-   URIs** add `http://localhost:8501/oauth2callback` for local use (add
-   your deployed `https://your-app-name.streamlit.app/oauth2callback` too,
-   once you know that URL from Streamlit Community Cloud).
-5. Copy the **Client ID** and **Client secret** it gives you.
-
-**Part 2 — a private Google Sheet for storing watchlists:**
-
-1. In the same (or a separate) Google Cloud project, enable the
-   **Google Sheets API** (APIs & Services → search for it → Enable).
-2. Create a **service account** (APIs & Services → Credentials → Create
-   Credentials → Service account), then generate and download a **JSON
-   key** for it.
-3. Create a new Google Sheet (any name), and note the long ID in its URL
-   (`https://docs.google.com/spreadsheets/d/`**`THIS_PART`**`/edit`).
-4. **Share** that sheet with the service account's email address (found
-   in the downloaded JSON as `client_email`), giving it **Editor** access
-   (not just Viewer — the app needs to write to it).
-
-**Putting it together:** copy `.streamlit/secrets.toml.example` (in this
-repo) to `.streamlit/secrets.toml` and fill in every value: the OAuth
-client ID/secret from Part 1, a random `cookie_secret` (generate one with
-`python -c "import secrets; print(secrets.token_hex(32))"`), the
-spreadsheet ID from Part 2, and every field from the downloaded service
-account JSON. **`secrets.toml` is gitignored on purpose — never commit
-it**, it holds real credentials. When you deploy to Streamlit Community
-Cloud later, paste the same values into that app's own Settings → Secrets
-box instead (with `redirect_uri` changed to the deployed URL, and that
-same URL added as an extra authorized redirect URI back in Part 1, step
-4).
-
-Until this is done, `app.py` shows a clear Mandarin error explaining
-what's missing instead of crashing outright — the rest of the app (and
-the command-line scripts) work exactly as before regardless.
+Nothing here needs `.streamlit/secrets.toml` any more — an earlier
+version of this feature used Google sign-in and a Google Sheet, which
+did; if you still have a `.streamlit/secrets.toml` file (or its
+`.example` template) from that, it's safe to delete.
 
 ## Shares outstanding and market value (opt-in)
 
