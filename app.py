@@ -21,6 +21,26 @@ Mandarin -- this is a UI-only translation layer. Every underlying script,
 CSV column name, and file name stays in English, since other scripts
 depend on those exact names.
 
+Login and personal watchlists
+------------------------------
+Visitors sign in with Google (st.login()). Two DIFFERENT lists exist,
+deliberately kept separate:
+
+- config.WATCHLIST -- the shared/global registry every fetch script reads
+  (price_data.py, dividend_data.py, etc.). Adding a ticker here means
+  "start collecting data for this ticker, for everyone." Still backed by
+  data/watchlist.json exactly as before login existed.
+- Each logged-in user's PERSONAL watchlist -- just which of the tickers
+  already in the shared registry THEY want to see, stored per-user in a
+  private Google Sheet via user_store.py (local files don't survive
+  Streamlit Community Cloud restarts, see that module's docstring).
+  Every display tab below shows only the current session's personal
+  watchlist, resolved against config.WATCHLIST for each ticker's name.
+
+This needs a one-time manual setup (a Google OAuth client + a Google
+Sheet + service account) that this file can't do by itself -- see the
+README's "Login and personal watchlists" section.
+
 Usage:
     streamlit run app.py
 Run this from the project folder (the same place you already run
@@ -46,6 +66,7 @@ import news_data
 import market_value_data
 import predict_dividends
 import ddm_valuation
+import user_store
 
 st.set_page_config(page_title="台灣股票追蹤器", layout="wide")
 
@@ -159,10 +180,6 @@ def load_csv(path):
     return df if not df.empty else None
 
 
-def watchlist_name(code):
-    return next((s["name"] for s in config.WATCHLIST if s["code"] == code), code)
-
-
 # --- Column-name translations for on-screen tables --------------------------
 # The underlying CSVs keep their English column names -- every script that
 # reads them (predict_dividends.py, ddm_valuation.py, etc.) depends on those
@@ -243,44 +260,127 @@ def display_table(df, column_order=None, labels=None):
     return out
 
 
-# --- Sidebar: manage watchlist ------------------------------------------
+# --- Login gate --------------------------------------------------------------
+# st.user/st.login/st.logout need an [auth] section in .streamlit/secrets.toml
+# (a Google OAuth client) -- see the README. Without it, st.login() itself
+# raises, so this is wrapped to fail with a clear Mandarin message instead of
+# a raw Python traceback if that setup hasn't been done yet.
 
-st.sidebar.title("追蹤清單")
+try:
+    _logged_in = st.user.is_logged_in
+except Exception:
+    st.title("台灣股票追蹤器")
+    st.error(
+        "登入功能尚未設定完成（缺少 Google 登入設定）。開發者需要先依照 README 的 "
+        "「Login and personal watchlists」章節，設定 Google OAuth 並建立 "
+        ".streamlit/secrets.toml，這個網頁才能使用。"
+    )
+    st.stop()
+
+if not _logged_in:
+    st.title("台灣股票追蹤器")
+    st.write("請先使用 Google 帳號登入，才能查看與管理你自己的追蹤清單。")
+    st.button("使用 Google 帳號登入", on_click=st.login, type="primary")
+    st.stop()
+
+USER_EMAIL = st.user.email
+USER_NAME = getattr(st.user, "name", None) or USER_EMAIL
+
+
+# --- Personal watchlist (this logged-in user, this session) -----------------
+
+def _load_personal_codes():
+    try:
+        saved = user_store.load_user_codes(USER_EMAIL)
+    except Exception as e:
+        st.sidebar.warning(f"無法讀取你已儲存的追蹤清單，暫時使用預設清單（錯誤：{e}）。")
+        saved = None
+    if saved is None:
+        # First time this account has logged in -- start from whatever's
+        # currently in the shared registry, same as what everyone saw
+        # before login existed.
+        saved = [s["code"] for s in config.WATCHLIST]
+    return saved
+
+
+if "personal_codes" not in st.session_state:
+    st.session_state["personal_codes"] = _load_personal_codes()
+
+
+def _save_personal_codes():
+    try:
+        user_store.save_user_codes(USER_EMAIL, st.session_state["personal_codes"])
+    except Exception as e:
+        st.sidebar.warning(f"追蹤清單暫時無法儲存到雲端（錯誤：{e}），但這個瀏覽階段仍可正常使用。")
+
+
+def personal_watchlist():
+    """This session's personal watchlist, resolved against the shared
+    registry (config.WATCHLIST) for name/name_en. A code the user saved
+    that isn't (or isn't yet) in the shared registry is silently dropped
+    here rather than crashing the page."""
+    by_code = {s["code"]: s for s in config.WATCHLIST}
+    return [by_code[c] for c in st.session_state["personal_codes"] if c in by_code]
+
+
+def watchlist_name(code):
+    return next((s["name"] for s in config.WATCHLIST if s["code"] == code), code)
+
+
+# --- Sidebar: account ---------------------------------------------------
+
+st.sidebar.title("帳號")
+st.sidebar.write(f"👤 {USER_NAME}")
+st.sidebar.caption(USER_EMAIL)
+st.sidebar.button("登出", on_click=st.logout)
+st.sidebar.divider()
+
+# --- Sidebar: manage personal watchlist ----------------------------------
+
+st.sidebar.title("我的追蹤清單")
 st.sidebar.caption(
-    "在這裡新增或移除股票代號 -- 這就是所有程式共用的 WATCHLIST，下面的抓取按鈕"
-    "與每個分頁顯示的內容都會跟著改變。變更會立即儲存（存到 data/watchlist.json），"
-    "下次打開這個頁面時也會保留。剛新增的股票代號會先顯示「尚無資料」，直到你按下"
-    "對應的抓取按鈕。"
+    "只有你自己看得到、改得到的清單，登入後會自動儲存，換裝置登入也看得到。"
+    "新增一檔股票時，如果這檔股票還沒有人抓過資料，會一併加進共用的抓取清單"
+    "（下面「更新資料」抓的就是這份共用清單），所以第一次加入後記得按抓取按鈕。"
 )
 
-for stock in list(config.WATCHLIST):
+for stock in personal_watchlist():
     col_label, col_remove = st.sidebar.columns([4, 1])
     col_label.write(f"{stock['code']} · {stock['name']}")
-    if col_remove.button("✕", key=f"remove_{stock['code']}", help=f"移除 {stock['code']}"):
-        if len(config.WATCHLIST) == 1:
+    if col_remove.button("✕", key=f"remove_{stock['code']}", help=f"從我的清單移除 {stock['code']}"):
+        if len(st.session_state["personal_codes"]) == 1:
             st.sidebar.error("無法移除最後一檔股票，請先新增其他股票代號。")
         else:
-            config.save_watchlist([s for s in config.WATCHLIST if s["code"] != stock["code"]])
+            st.session_state["personal_codes"] = [
+                c for c in st.session_state["personal_codes"] if c != stock["code"]
+            ]
+            _save_personal_codes()
             st.rerun()
 
 with st.sidebar.form("add_ticker_form", clear_on_submit=True):
     st.caption("新增股票代號（台股代碼，例如 2330 代表台積電）")
     new_code = st.text_input("代號")
-    new_name = st.text_input("中文名稱（選填）")
+    new_name = st.text_input("中文名稱（選填，僅在這檔股票是全站第一次加入時需要）")
     new_name_en = st.text_input("英文名稱（選填）")
-    if st.form_submit_button("新增"):
+    if st.form_submit_button("加入我的清單"):
         code = new_code.strip()
         if not code:
             st.sidebar.error("請先輸入股票代號。")
-        elif any(s["code"] == code for s in config.WATCHLIST):
-            st.sidebar.warning(f"{code} 已經在追蹤清單中。")
+        elif code in st.session_state["personal_codes"]:
+            st.sidebar.warning(f"{code} 已經在你的追蹤清單中。")
         else:
-            new_entry = {
-                "code": code,
-                "name": new_name.strip() or code,
-                "name_en": new_name_en.strip() or code,
-            }
-            config.save_watchlist(list(config.WATCHLIST) + [new_entry])
+            if not any(s["code"] == code for s in config.WATCHLIST):
+                # Brand new to the whole app -- add it to the shared
+                # registry too, so the Fetch buttons below start pulling
+                # data for it. Other users' personal lists are untouched.
+                new_entry = {
+                    "code": code,
+                    "name": new_name.strip() or code,
+                    "name_en": new_name_en.strip() or code,
+                }
+                config.save_watchlist(list(config.WATCHLIST) + [new_entry])
+            st.session_state["personal_codes"] = st.session_state["personal_codes"] + [code]
+            _save_personal_codes()
             st.rerun()
 
 st.sidebar.divider()
@@ -289,10 +389,10 @@ st.sidebar.divider()
 
 st.sidebar.title("更新資料")
 st.sidebar.caption(
-    "以下每個按鈕執行的程式碼，跟在 PowerShell 執行對應指令（例如 "
-    "`python price_data.py`）完全相同。這會即時連線 TWSE/yfinance，並刻意放慢"
-    "速度 -- 詳見 config.py 的 REQUEST_DELAY_SECONDS -- 如果看起來很慢，請不要"
-    "重複點擊。"
+    "以下每個按鈕抓的是共用資料（所有登入使用者的追蹤清單合起來），跟在 "
+    "PowerShell 執行對應指令（例如 `python price_data.py`）完全相同。這會即時"
+    "連線 TWSE/yfinance，並刻意放慢速度 -- 詳見 config.py 的 "
+    "REQUEST_DELAY_SECONDS -- 如果看起來很慢，請不要重複點擊。"
 )
 
 st.sidebar.caption(
@@ -328,7 +428,8 @@ if st.sidebar.button("重新計算 DDM 估值", use_container_width=True):
 # --- Header ------------------------------------------------------------------
 
 st.title("台灣股票追蹤器")
-st.caption("追蹤清單：" + "、".join(f"{s['code']} {s['name']}" for s in config.WATCHLIST))
+my_watchlist = personal_watchlist()
+st.caption("我的追蹤清單：" + "、".join(f"{s['code']} {s['name']}" for s in my_watchlist))
 
 tab_overview, tab_prices, tab_dividends, tab_market_value, tab_ddm, tab_news = st.tabs(
     ["總覽", "股價", "股利", "市值", "DDM 估值", "新聞"]
@@ -337,8 +438,8 @@ tab_overview, tab_prices, tab_dividends, tab_market_value, tab_ddm, tab_news = s
 # --- Overview ------------------------------------------------------------------
 
 with tab_overview:
-    cols = st.columns(len(config.WATCHLIST))
-    for col, stock in zip(cols, config.WATCHLIST):
+    cols = st.columns(len(my_watchlist))
+    for col, stock in zip(cols, my_watchlist):
         code = stock["code"]
         prices = load_csv(os.path.join(config.DATA_DIR, "prices", f"{code}.csv"))
         mv = load_csv(os.path.join(config.DATA_DIR, "market_value", f"{code}.csv"))
@@ -358,7 +459,7 @@ with tab_overview:
 # --- Prices ----------------------------------------------------------------------
 
 with tab_prices:
-    codes = [s["code"] for s in config.WATCHLIST]
+    codes = [s["code"] for s in my_watchlist]
     picked = st.selectbox("選擇股票代號", codes, format_func=lambda c: f"{c} {watchlist_name(c)}")
     prices = load_csv(os.path.join(config.DATA_DIR, "prices", f"{picked}.csv"))
     if prices is None:
@@ -374,25 +475,49 @@ with tab_prices:
 # --- Dividends -------------------------------------------------------------------
 
 with tab_dividends:
-    st.subheader("股利發放紀錄")
     divs = load_csv(os.path.join(config.DATA_DIR, "dividends", "dividends.csv"))
-    if divs is None:
+    pred = load_csv(os.path.join(config.DATA_DIR, "dividends", "dividend_prediction.csv"))
+
+    if divs is None and pred is None:
         st.info("尚無股利資料 -- 請在側邊欄點擊「抓取股利」。")
     else:
-        st.dataframe(
-            display_table(divs.sort_values("ex_dividend_date", ascending=False), labels=DIVIDEND_COLUMNS_ZH),
-            use_container_width=True, hide_index=True,
-        )
+        for i, stock in enumerate(my_watchlist):
+            code = stock["code"]
+            st.subheader(f"{code} {stock['name']}")
 
-    st.subheader("下次配息預測（兩種方法，近1年資料）")
-    pred = load_csv(os.path.join(config.DATA_DIR, "dividends", "dividend_prediction.csv"))
-    if pred is None:
-        st.info("尚無預測結果 -- 請在側邊欄點擊「重新計算股利預測」（需要先有股利與股價資料）。")
-    else:
-        st.dataframe(
-            display_table(pred, labels=DIVIDEND_PREDICTION_COLUMNS_ZH),
-            use_container_width=True, hide_index=True,
-        )
+            st.caption("股利發放紀錄")
+            ticker_divs = divs[divs["code"] == code] if divs is not None else None
+            if ticker_divs is None or ticker_divs.empty:
+                st.caption("尚無股利發放紀錄 -- 請在側邊欄點擊「抓取股利」。")
+            else:
+                # code/name/name_en dropped from the per-ticker table -- they're
+                # constant within this ticker's section (already shown in the
+                # subheader above), so repeating them on every row is just noise.
+                st.dataframe(
+                    display_table(
+                        ticker_divs.drop(columns=["code", "name", "name_en"], errors="ignore")
+                                   .sort_values("ex_dividend_date", ascending=False),
+                        labels=DIVIDEND_COLUMNS_ZH,
+                    ),
+                    use_container_width=True, hide_index=True,
+                )
+
+            st.caption("下次配息預測（兩種方法，近1年資料）")
+            ticker_pred = pred[pred["code"] == code] if pred is not None else None
+            if ticker_pred is None or ticker_pred.empty:
+                st.caption("尚無預測結果 -- 請在側邊欄點擊「重新計算股利預測」（需要先有股利與股價資料）。")
+            else:
+                st.dataframe(
+                    display_table(
+                        ticker_pred.drop(columns=["code", "name", "name_en"], errors="ignore"),
+                        labels=DIVIDEND_PREDICTION_COLUMNS_ZH,
+                    ),
+                    use_container_width=True, hide_index=True,
+                )
+
+            if i < len(my_watchlist) - 1:
+                st.divider()
+
         st.caption(
             "方法A：以幾何平均成長率推算下一次配息金額。方法B：以平均殖利率 × 最新股價"
             "估算。兩者假設不同，結果經常不一致 -- 詳細原因與所有注意事項請見 README 的 "
@@ -402,7 +527,7 @@ with tab_dividends:
 # --- Market value -------------------------------------------------------------------
 
 with tab_market_value:
-    for stock in config.WATCHLIST:
+    for stock in my_watchlist:
         code = stock["code"]
         mv = load_csv(os.path.join(config.DATA_DIR, "market_value", f"{code}.csv"))
         st.subheader(f"{code} {stock['name']}")
@@ -431,17 +556,22 @@ with tab_ddm:
     if ddm is None:
         st.info("尚無 DDM 估值結果 -- 請在側邊欄點擊「重新計算 DDM 估值」（需要先有股利與股價資料）。")
     else:
-        st.dataframe(
-            display_table(ddm, column_order=DDM_COLUMN_ORDER, labels=DDM_COLUMNS_ZH),
-            use_container_width=True, hide_index=True,
-        )
-        st.caption(
-            "與市價差異%（多項式模型 / 均值回歸模型）: 正值 = 模型認為目前價格被低估，"
-            "負值 = 被高估。估值欄位就排在「最新股價」旁邊方便比較，但這只是有限年期內"
-            "股利的現值加總（沒有終值），是一個下限，不是完整的公允價值估計。詳細方法論"
-            "與所有注意事項請見 README 的 'DDM valuation' 章節，尤其像 0050 這種主要靠"
-            "價差、股利配發相對少的 ETF，這個數字更不能單獨當作定論。"
-        )
+        my_codes = [s["code"] for s in my_watchlist]
+        ddm_mine = ddm[ddm["code"].isin(my_codes)]
+        if ddm_mine.empty:
+            st.info("你的追蹤清單中的股票尚無 DDM 估值結果 -- 請在側邊欄點擊「重新計算 DDM 估值」。")
+        else:
+            st.dataframe(
+                display_table(ddm_mine, column_order=DDM_COLUMN_ORDER, labels=DDM_COLUMNS_ZH),
+                use_container_width=True, hide_index=True,
+            )
+            st.caption(
+                "與市價差異%（多項式模型 / 均值回歸模型）: 正值 = 模型認為目前價格被低估，"
+                "負值 = 被高估。估值欄位就排在「最新股價」旁邊方便比較，但這只是有限年期內"
+                "股利的現值加總（沒有終值），是一個下限，不是完整的公允價值估計。詳細方法論"
+                "與所有注意事項請見 README 的 'DDM valuation' 章節，尤其像 0050 這種主要靠"
+                "價差、股利配發相對少的 ETF，這個數字更不能單獨當作定論。"
+            )
 
 # --- News -------------------------------------------------------------------------
 
@@ -450,6 +580,11 @@ with tab_news:
     if news is None:
         st.info("尚無新聞資料 -- 請在側邊欄點擊「抓取新聞」。")
     else:
-        for _, row in news.iterrows():
-            st.markdown(f"**[{row['title']}]({row['link']})**")
-            st.caption(f"{row['company']} ({row['code']}) · {row['source']} · {row['published']}")
+        my_codes = [s["code"] for s in my_watchlist]
+        news_mine = news[news["code"].isin(my_codes)]
+        if news_mine.empty:
+            st.info("你的追蹤清單中的股票尚無新聞資料 -- 請在側邊欄點擊「抓取新聞」。")
+        else:
+            for _, row in news_mine.iterrows():
+                st.markdown(f"**[{row['title']}]({row['link']})**")
+                st.caption(f"{row['company']} ({row['code']}) · {row['source']} · {row['published']}")

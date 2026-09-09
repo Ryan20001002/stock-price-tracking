@@ -24,3 +24,11 @@ Claude outputs/
 # wrong with that for a dissertation project where reproducibility of a
 # specific dataset matters.
 data/
+
+# CRITICAL: never commit this. Holds your Google OAuth client secret and
+# your Google Sheets service account's private key in plain text (see
+# README's "Login and personal watchlists" section) -- anyone who reads
+# this file from a public repo could sign in as your app and read/write
+# your Google Sheet. Streamlit Community Cloud gets these same values
+# pasted into its own "Secrets" panel instead, never from this file.
+.streamlit/secrets.toml
