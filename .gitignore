@@ -1,0 +1,26 @@
+# Python cache/bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments, if you ever create one
+.venv/
+venv/
+env/
+
+# OS clutter
+.DS_Store
+Thumbs.db
+
+# Stray duplicate files that ended up saved alongside the real project --
+# safe to delete manually; kept out of git either way as a safety net.
+Claude outputs/
+
+# Fetched/generated data -- this is output the scripts (re)create by
+# running main.py, price_data.py, etc., not source code. Excluded by
+# default so the repo stays small and doesn't fill up with CSVs over
+# time. Delete this line (or move it below a `data/.gitkeep` exception)
+# if you'd rather snapshot your data in the repo too -- there's nothing
+# wrong with that for a dissertation project where reproducibility of a
+# specific dataset matters.
+data/
