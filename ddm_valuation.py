@@ -3,8 +3,8 @@ Dividend Discount Model (DDM) valuation -- finite-horizon version.
 
 Estimates each ticker's "intrinsic" fair value per unit as the present
 value of its dividends over an explicit N-year horizon (see
-DDM_FORECAST_HORIZON_YEARS in config.py, default 10 -- try 20 too), and
-compares that to the actual current market price.
+DDM_FORECAST_HORIZON_YEARS in config.py, default 20 -- try 10 or 30 too),
+and compares that to the actual current market price.
 
 Why this design (and not a classic Gordon-Growth DDM)
 -------------------------------------------------------
@@ -80,7 +80,15 @@ CAVEATS -- read before treating any number here as a real valuation
   true value for a fund expected to keep paying past year N (which, for
   an index ETF, is presumably indefinitely). Read the output as "PV of
   the next N years of dividends", not "what this is worth" -- and compare
-  the 10y vs. 20y sensitivity rows to see how much is being left out.
+  the 5y/10y/20y sensitivity rows (printed every run) to see how much of
+  the total is coming from years 11-20, and how much is still being left
+  out beyond that.
+- Horizon raised from 10 to 20 years (2026-09-09): a longer horizon gets
+  closer to a "full" valuation, but leans harder on the fitted growth
+  rate holding up -- 20 years of compounding magnifies whatever the
+  growth model gets wrong far more than 10 years did, and is more likely
+  to run into the DDM_MAX_ANNUAL_GROWTH safety clamp. Worth occasionally
+  re-checking the sensitivity table's 10y column against the 20y one.
 - Small-sample growth fitting: with a 5-year lookback, the growth models
   fit on as few as 5-6 annual data points (fewer for 00878, listed 2020).
   A trend or AR(1) fit on a handful of points is still a rough estimate,

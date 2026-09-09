@@ -108,10 +108,15 @@ DDM_EQUITY_RISK_PREMIUM = 0.0501
 # How many years of future dividends to explicitly discount and sum. NO
 # terminal-value formula is applied beyond this -- dividends after year N
 # are simply not counted (see ddm_valuation.py's docstring for why: it
-# trades "understates true value" for "no unstable r-g division"). Try
-# both 10 and 20 and compare -- the script's sensitivity table also shows
-# this side by side automatically.
-DDM_FORECAST_HORIZON_YEARS = 10
+# trades "understates true value" for "no unstable r-g division"). Raised
+# from 10 to 20 (2026-09-09, at your request) to get closer to a "full"
+# valuation -- the trade-off is more reliance on the growth-rate
+# assumption (20 years of compounding vs. 10 magnifies whatever the
+# fitted growth model gets wrong, and is more likely to run into the
+# DDM_MAX_ANNUAL_GROWTH safety clamp below). The printed sensitivity
+# table still compares 5y/10y/20y side by side every run, so you can see
+# how much of the valuation is coming from the years beyond 10.
+DDM_FORECAST_HORIZON_YEARS = 20
 
 # How many of the most recent COMPLETE calendar years of dividend history
 # to use when fitting the growth models (Model A polynomial trend, Model
