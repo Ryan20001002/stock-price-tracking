@@ -498,11 +498,52 @@ with tab_prices:
             st.info("尚無股價資料 -- 請在側邊欄點擊「抓取股價」。")
         else:
             prices["Date"] = pd.to_datetime(prices["Date"])
-            st.line_chart(prices.set_index("Date")["Close"])
-            st.dataframe(
-                display_table(prices.sort_values("Date", ascending=False), labels=PRICE_COLUMNS_ZH),
-                use_container_width=True, hide_index=True,
+            prices = prices.sort_values("Date")
+            min_date = prices["Date"].min().date()
+            max_date = prices["Date"].max().date()
+
+            # Quick presets (in days, counting back from the latest date on
+            # file) plus a custom start/end option. Keyed per-ticker so
+            # switching between stocks in the dropdown above doesn't carry
+            # one ticker's chosen range over to another's widget state.
+            RANGE_PRESET_DAYS = {
+                "1週": 7, "1個月": 30, "3個月": 91, "6個月": 182,
+                "1年": 365, "3年": 365 * 3,
+            }
+            range_options = list(RANGE_PRESET_DAYS) + ["全部", "自訂..."]
+            range_choice = st.radio(
+                "顯示區間", range_options, index=range_options.index("全部"),
+                horizontal=True, key=f"price_range_{picked}",
             )
+
+            if range_choice == "自訂...":
+                col_start, col_end = st.columns(2)
+                start_date = col_start.date_input(
+                    "起始日期", value=min_date, min_value=min_date, max_value=max_date,
+                    key=f"price_start_{picked}",
+                )
+                end_date = col_end.date_input(
+                    "結束日期", value=max_date, min_value=min_date, max_value=max_date,
+                    key=f"price_end_{picked}",
+                )
+                if start_date > end_date:
+                    st.warning("起始日期不能晚於結束日期，已自動交換兩者。")
+                    start_date, end_date = end_date, start_date
+            elif range_choice == "全部":
+                start_date, end_date = min_date, max_date
+            else:
+                end_date = max_date
+                start_date = max(min_date, max_date - pd.Timedelta(days=RANGE_PRESET_DAYS[range_choice]))
+
+            filtered = prices[(prices["Date"].dt.date >= start_date) & (prices["Date"].dt.date <= end_date)]
+            if filtered.empty:
+                st.info("這個區間內沒有股價資料，請試試其他區間。")
+            else:
+                st.line_chart(filtered.set_index("Date")["Close"])
+                st.dataframe(
+                    display_table(filtered.sort_values("Date", ascending=False), labels=PRICE_COLUMNS_ZH),
+                    use_container_width=True, hide_index=True,
+                )
 
 # --- Dividends -------------------------------------------------------------------
 
