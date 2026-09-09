@@ -307,20 +307,17 @@ USER_NAME = st.session_state["auth_user"]
 # --- Personal watchlist (this logged-in account, this session) --------------
 
 def _load_personal_codes():
-    """Returns (codes, is_first_time). is_first_time is True when this
-    account had no saved watchlist yet (a brand-new account, or the
-    "shouldn't normally happen" None case) -- used below to show a
-    one-time welcome message, in addition to falling back to the shared
-    registry rather than leaving this session with an empty watchlist (an
-    empty list breaks several tabs below, e.g. st.columns(0))."""
-    saved = user_store.load_user_codes(USER_NAME)
-    if not saved:
-        return [s["code"] for s in config.WATCHLIST], True
-    return saved, False
+    """A brand-new account (and the "shouldn't normally happen" None
+    case) starts with an EMPTY personal watchlist -- deliberately no
+    auto-added default tickers, so a new account never sees any share's
+    data until they've actually added one themselves. Every tab below is
+    written to handle an empty watchlist gracefully (see NO_WATCHLIST_MSG)
+    rather than assuming at least one ticker."""
+    return user_store.load_user_codes(USER_NAME) or []
 
 
 if "personal_codes" not in st.session_state:
-    st.session_state["personal_codes"], st.session_state["show_welcome"] = _load_personal_codes()
+    st.session_state["personal_codes"] = _load_personal_codes()
 
 
 def _save_personal_codes():
@@ -347,7 +344,6 @@ st.sidebar.write(f"👤 {USER_NAME}")
 if st.sidebar.button("登出"):
     st.session_state["auth_user"] = None
     st.session_state.pop("personal_codes", None)
-    st.session_state.pop("show_welcome", None)
     st.rerun()
 st.sidebar.divider()
 
@@ -360,18 +356,18 @@ st.sidebar.caption(
     "（下面「更新資料」抓的就是這份共用清單），所以第一次加入後記得按抓取按鈕。"
 )
 
+if not personal_watchlist():
+    st.sidebar.caption("（目前是空的，用下面的表單新增你想追蹤的第一檔股票）")
+
 for stock in personal_watchlist():
     col_label, col_remove = st.sidebar.columns([4, 1])
     col_label.write(f"{stock['code']} · {stock['name']}")
     if col_remove.button("✕", key=f"remove_{stock['code']}", help=f"從我的清單移除 {stock['code']}"):
-        if len(st.session_state["personal_codes"]) == 1:
-            st.sidebar.error("無法移除最後一檔股票，請先新增其他股票代號。")
-        else:
-            st.session_state["personal_codes"] = [
-                c for c in st.session_state["personal_codes"] if c != stock["code"]
-            ]
-            _save_personal_codes()
-            st.rerun()
+        st.session_state["personal_codes"] = [
+            c for c in st.session_state["personal_codes"] if c != stock["code"]
+        ]
+        _save_personal_codes()
+        st.rerun()
 
 with st.sidebar.form("add_ticker_form", clear_on_submit=True):
     st.caption("新增股票代號（台股代碼，例如 2330 代表台積電）")
@@ -445,20 +441,21 @@ if st.sidebar.button("重新計算 DDM 估值", use_container_width=True):
 
 st.title("台灣股票追蹤器")
 
-if st.session_state.get("show_welcome"):
-    st.info(
-        "👋 歡迎，這是你第一次登入！系統已經幫你放入預設的追蹤清單（下面會列出來），"
-        "你可以隨時到左側「我的追蹤清單」新增或移除想追蹤的股票。如果畫面上的表格都顯示"
-        "「尚無資料」，代表這是全站第一次抓取，請先到左側「更新資料」按「🔄 一鍵抓取全部"
-        "資料」。",
-        icon="👋",
-    )
-    if st.button("我知道了"):
-        st.session_state["show_welcome"] = False
-        st.rerun()
-
 my_watchlist = personal_watchlist()
-st.caption("我的追蹤清單：" + "、".join(f"{s['code']} {s['name']}" for s in my_watchlist))
+
+# Shared across every tab below -- a brand-new (or emptied-out) personal
+# watchlist means there's nothing of THIS account's to show yet. Every tab
+# checks `if not my_watchlist` and shows this instead of any share's data,
+# rather than falling back to some default set of tickers.
+NO_WATCHLIST_MSG = (
+    "你的追蹤清單目前是空的，還沒有加入任何股票。請在左側「我的追蹤清單」輸入股票代號，"
+    "按「加入我的清單」，這裡才會顯示對應的股價／股利／市值等資訊。"
+)
+
+if not my_watchlist:
+    st.info("👋 " + NO_WATCHLIST_MSG, icon="👋")
+else:
+    st.caption("我的追蹤清單：" + "、".join(f"{s['code']} {s['name']}" for s in my_watchlist))
 
 tab_overview, tab_prices, tab_dividends, tab_market_value, tab_ddm, tab_news = st.tabs(
     ["總覽", "股價", "股利", "市值", "DDM 估值", "新聞"]
@@ -467,153 +464,172 @@ tab_overview, tab_prices, tab_dividends, tab_market_value, tab_ddm, tab_news = s
 # --- Overview ------------------------------------------------------------------
 
 with tab_overview:
-    cols = st.columns(len(my_watchlist))
-    for col, stock in zip(cols, my_watchlist):
-        code = stock["code"]
-        prices = load_csv(os.path.join(config.DATA_DIR, "prices", f"{code}.csv"))
-        mv = load_csv(os.path.join(config.DATA_DIR, "market_value", f"{code}.csv"))
-        with col:
-            st.subheader(f"{code}")
-            st.caption(stock["name"])
-            if prices is not None:
-                latest = prices.iloc[-1]
-                st.metric("最新收盤價", f"{latest['Close']:.2f}", help=f"資料日期：{latest['Date']}")
-            else:
-                st.caption("尚無股價資料。")
-            if mv is not None:
-                latest_mv = mv.iloc[-1]
-                st.metric("市值（新台幣）", f"{latest_mv['MarketValue']:,.0f}")
-    st.info("第一次使用請從側邊欄抓取資料，之後也可以用來更新資料。", icon="ℹ️")
+    if not my_watchlist:
+        st.info(NO_WATCHLIST_MSG)
+    else:
+        cols = st.columns(len(my_watchlist))
+        for col, stock in zip(cols, my_watchlist):
+            code = stock["code"]
+            prices = load_csv(os.path.join(config.DATA_DIR, "prices", f"{code}.csv"))
+            mv = load_csv(os.path.join(config.DATA_DIR, "market_value", f"{code}.csv"))
+            with col:
+                st.subheader(f"{code}")
+                st.caption(stock["name"])
+                if prices is not None:
+                    latest = prices.iloc[-1]
+                    st.metric("最新收盤價", f"{latest['Close']:.2f}", help=f"資料日期：{latest['Date']}")
+                else:
+                    st.caption("尚無股價資料。")
+                if mv is not None:
+                    latest_mv = mv.iloc[-1]
+                    st.metric("市值（新台幣）", f"{latest_mv['MarketValue']:,.0f}")
+        st.info("第一次使用請從側邊欄抓取資料，之後也可以用來更新資料。", icon="ℹ️")
 
 # --- Prices ----------------------------------------------------------------------
 
 with tab_prices:
-    codes = [s["code"] for s in my_watchlist]
-    picked = st.selectbox("選擇股票代號", codes, format_func=lambda c: f"{c} {watchlist_name(c)}")
-    prices = load_csv(os.path.join(config.DATA_DIR, "prices", f"{picked}.csv"))
-    if prices is None:
-        st.info("尚無股價資料 -- 請在側邊欄點擊「抓取股價」。")
+    if not my_watchlist:
+        st.info(NO_WATCHLIST_MSG)
     else:
-        prices["Date"] = pd.to_datetime(prices["Date"])
-        st.line_chart(prices.set_index("Date")["Close"])
-        st.dataframe(
-            display_table(prices.sort_values("Date", ascending=False), labels=PRICE_COLUMNS_ZH),
-            use_container_width=True, hide_index=True,
-        )
+        codes = [s["code"] for s in my_watchlist]
+        picked = st.selectbox("選擇股票代號", codes, format_func=lambda c: f"{c} {watchlist_name(c)}")
+        prices = load_csv(os.path.join(config.DATA_DIR, "prices", f"{picked}.csv"))
+        if prices is None:
+            st.info("尚無股價資料 -- 請在側邊欄點擊「抓取股價」。")
+        else:
+            prices["Date"] = pd.to_datetime(prices["Date"])
+            st.line_chart(prices.set_index("Date")["Close"])
+            st.dataframe(
+                display_table(prices.sort_values("Date", ascending=False), labels=PRICE_COLUMNS_ZH),
+                use_container_width=True, hide_index=True,
+            )
 
 # --- Dividends -------------------------------------------------------------------
 
 with tab_dividends:
-    divs = load_csv(os.path.join(config.DATA_DIR, "dividends", "dividends.csv"))
-    pred = load_csv(os.path.join(config.DATA_DIR, "dividends", "dividend_prediction.csv"))
-
-    if divs is None and pred is None:
-        st.info("尚無股利資料 -- 請在側邊欄點擊「抓取股利」。")
+    if not my_watchlist:
+        st.info(NO_WATCHLIST_MSG)
     else:
-        for i, stock in enumerate(my_watchlist):
-            code = stock["code"]
-            st.subheader(f"{code} {stock['name']}")
+        divs = load_csv(os.path.join(config.DATA_DIR, "dividends", "dividends.csv"))
+        pred = load_csv(os.path.join(config.DATA_DIR, "dividends", "dividend_prediction.csv"))
 
-            st.caption("股利發放紀錄")
-            ticker_divs = divs[divs["code"] == code] if divs is not None else None
-            if ticker_divs is None or ticker_divs.empty:
-                st.caption("尚無股利發放紀錄 -- 請在側邊欄點擊「抓取股利」。")
-            else:
-                # code/name/name_en dropped from the per-ticker table -- they're
-                # constant within this ticker's section (already shown in the
-                # subheader above), so repeating them on every row is just noise.
-                st.dataframe(
-                    display_table(
-                        ticker_divs.drop(columns=["code", "name", "name_en"], errors="ignore")
-                                   .sort_values("ex_dividend_date", ascending=False),
-                        labels=DIVIDEND_COLUMNS_ZH,
-                    ),
-                    use_container_width=True, hide_index=True,
-                )
+        if divs is None and pred is None:
+            st.info("尚無股利資料 -- 請在側邊欄點擊「抓取股利」。")
+        else:
+            for i, stock in enumerate(my_watchlist):
+                code = stock["code"]
+                st.subheader(f"{code} {stock['name']}")
 
-            st.caption("下次配息預測（兩種方法，近1年資料）")
-            ticker_pred = pred[pred["code"] == code] if pred is not None else None
-            if ticker_pred is None or ticker_pred.empty:
-                st.caption("尚無預測結果 -- 請在側邊欄點擊「重新計算股利預測」（需要先有股利與股價資料）。")
-            else:
-                st.dataframe(
-                    display_table(
-                        ticker_pred.drop(columns=["code", "name", "name_en"], errors="ignore"),
-                        labels=DIVIDEND_PREDICTION_COLUMNS_ZH,
-                    ),
-                    use_container_width=True, hide_index=True,
-                )
+                st.caption("股利發放紀錄")
+                ticker_divs = divs[divs["code"] == code] if divs is not None else None
+                if ticker_divs is None or ticker_divs.empty:
+                    st.caption("尚無股利發放紀錄 -- 請在側邊欄點擊「抓取股利」。")
+                else:
+                    # code/name/name_en dropped from the per-ticker table --
+                    # they're constant within this ticker's section (already
+                    # shown in the subheader above), so repeating them on
+                    # every row is just noise.
+                    st.dataframe(
+                        display_table(
+                            ticker_divs.drop(columns=["code", "name", "name_en"], errors="ignore")
+                                       .sort_values("ex_dividend_date", ascending=False),
+                            labels=DIVIDEND_COLUMNS_ZH,
+                        ),
+                        use_container_width=True, hide_index=True,
+                    )
 
-            if i < len(my_watchlist) - 1:
-                st.divider()
+                st.caption("下次配息預測（兩種方法，近1年資料）")
+                ticker_pred = pred[pred["code"] == code] if pred is not None else None
+                if ticker_pred is None or ticker_pred.empty:
+                    st.caption("尚無預測結果 -- 請在側邊欄點擊「重新計算股利預測」（需要先有股利與股價資料）。")
+                else:
+                    st.dataframe(
+                        display_table(
+                            ticker_pred.drop(columns=["code", "name", "name_en"], errors="ignore"),
+                            labels=DIVIDEND_PREDICTION_COLUMNS_ZH,
+                        ),
+                        use_container_width=True, hide_index=True,
+                    )
 
-        st.caption(
-            "方法A：以幾何平均成長率推算下一次配息金額。方法B：以平均殖利率 × 最新股價"
-            "估算。兩者假設不同，結果經常不一致 -- 詳細原因與所有注意事項請見 README 的 "
-            "'Predicting the next dividend' 章節，使用前請勿只憑其中一個數字下定論。"
-        )
+                if i < len(my_watchlist) - 1:
+                    st.divider()
+
+            st.caption(
+                "方法A：以幾何平均成長率推算下一次配息金額。方法B：以平均殖利率 × 最新股價"
+                "估算。兩者假設不同，結果經常不一致 -- 詳細原因與所有注意事項請見 README 的 "
+                "'Predicting the next dividend' 章節，使用前請勿只憑其中一個數字下定論。"
+            )
 
 # --- Market value -------------------------------------------------------------------
 
 with tab_market_value:
-    for stock in my_watchlist:
-        code = stock["code"]
-        mv = load_csv(os.path.join(config.DATA_DIR, "market_value", f"{code}.csv"))
-        st.subheader(f"{code} {stock['name']}")
-        if mv is None:
-            st.caption("尚無市值資料 -- 請在側邊欄點擊「抓取流通股數／市值」。")
-            continue
-        latest = mv.sort_values("Date").iloc[-1]
-        c1, c2, c3 = st.columns(3)
-        c1.metric("收盤價", f"{latest['Close']:.2f}")
-        c2.metric("流通股數", f"{int(latest['SharesOutstanding']):,}")
-        c3.metric("市值（新台幣）", f"{latest['MarketValue']:,.0f}")
-        st.dataframe(
-            display_table(mv.sort_values("Date", ascending=False), labels=MARKET_VALUE_COLUMNS_ZH),
-            use_container_width=True, hide_index=True,
+    if not my_watchlist:
+        st.info(NO_WATCHLIST_MSG)
+    else:
+        for stock in my_watchlist:
+            code = stock["code"]
+            mv = load_csv(os.path.join(config.DATA_DIR, "market_value", f"{code}.csv"))
+            st.subheader(f"{code} {stock['name']}")
+            if mv is None:
+                st.caption("尚無市值資料 -- 請在側邊欄點擊「抓取流通股數／市值」。")
+                continue
+            latest = mv.sort_values("Date").iloc[-1]
+            c1, c2, c3 = st.columns(3)
+            c1.metric("收盤價", f"{latest['Close']:.2f}")
+            c2.metric("流通股數", f"{int(latest['SharesOutstanding']):,}")
+            c3.metric("市值（新台幣）", f"{latest['MarketValue']:,.0f}")
+            st.dataframe(
+                display_table(mv.sort_values("Date", ascending=False), labels=MARKET_VALUE_COLUMNS_ZH),
+                use_container_width=True, hide_index=True,
+            )
+        st.caption(
+            "對 ETF 而言，這個數字是資產規模（AUM）的代表值（單位淨值 × 流通單位數），"
+            "並非一般公司市值的概念。只會從你開始執行抓取的那天起，每天累積一筆資料 -- "
+            "詳見 README 說明為何沒有回溯歷史資料。"
         )
-    st.caption(
-        "對 ETF 而言，這個數字是資產規模（AUM）的代表值（單位淨值 × 流通單位數），"
-        "並非一般公司市值的概念。只會從你開始執行抓取的那天起，每天累積一筆資料 -- "
-        "詳見 README 說明為何沒有回溯歷史資料。"
-    )
 
 # --- DDM valuation -------------------------------------------------------------------
 
 with tab_ddm:
-    ddm = load_csv(os.path.join(config.DATA_DIR, "dividends", "ddm_valuation.csv"))
-    if ddm is None:
-        st.info("尚無 DDM 估值結果 -- 請在側邊欄點擊「重新計算 DDM 估值」（需要先有股利與股價資料）。")
+    if not my_watchlist:
+        st.info(NO_WATCHLIST_MSG)
     else:
-        my_codes = [s["code"] for s in my_watchlist]
-        ddm_mine = ddm[ddm["code"].isin(my_codes)]
-        if ddm_mine.empty:
-            st.info("你的追蹤清單中的股票尚無 DDM 估值結果 -- 請在側邊欄點擊「重新計算 DDM 估值」。")
+        ddm = load_csv(os.path.join(config.DATA_DIR, "dividends", "ddm_valuation.csv"))
+        if ddm is None:
+            st.info("尚無 DDM 估值結果 -- 請在側邊欄點擊「重新計算 DDM 估值」（需要先有股利與股價資料）。")
         else:
-            st.dataframe(
-                display_table(ddm_mine, column_order=DDM_COLUMN_ORDER, labels=DDM_COLUMNS_ZH),
-                use_container_width=True, hide_index=True,
-            )
-            st.caption(
-                "與市價差異%（多項式模型 / 均值回歸模型）: 正值 = 模型認為目前價格被低估，"
-                "負值 = 被高估。估值欄位就排在「最新股價」旁邊方便比較，但這只是有限年期內"
-                "股利的現值加總（沒有終值），是一個下限，不是完整的公允價值估計。詳細方法論"
-                "與所有注意事項請見 README 的 'DDM valuation' 章節，尤其像 0050 這種主要靠"
-                "價差、股利配發相對少的 ETF，這個數字更不能單獨當作定論。"
-            )
+            my_codes = [s["code"] for s in my_watchlist]
+            ddm_mine = ddm[ddm["code"].isin(my_codes)]
+            if ddm_mine.empty:
+                st.info("你的追蹤清單中的股票尚無 DDM 估值結果 -- 請在側邊欄點擊「重新計算 DDM 估值」。")
+            else:
+                st.dataframe(
+                    display_table(ddm_mine, column_order=DDM_COLUMN_ORDER, labels=DDM_COLUMNS_ZH),
+                    use_container_width=True, hide_index=True,
+                )
+                st.caption(
+                    "與市價差異%（多項式模型 / 均值回歸模型）: 正值 = 模型認為目前價格被低估，"
+                    "負值 = 被高估。估值欄位就排在「最新股價」旁邊方便比較，但這只是有限年期內"
+                    "股利的現值加總（沒有終值），是一個下限，不是完整的公允價值估計。詳細方法論"
+                    "與所有注意事項請見 README 的 'DDM valuation' 章節，尤其像 0050 這種主要靠"
+                    "價差、股利配發相對少的 ETF，這個數字更不能單獨當作定論。"
+                )
 
 # --- News -------------------------------------------------------------------------
 
 with tab_news:
-    news = load_csv(os.path.join(config.DATA_DIR, "news", "news.csv"))
-    if news is None:
-        st.info("尚無新聞資料 -- 請在側邊欄點擊「抓取新聞」。")
+    if not my_watchlist:
+        st.info(NO_WATCHLIST_MSG)
     else:
-        my_codes = [s["code"] for s in my_watchlist]
-        news_mine = news[news["code"].isin(my_codes)]
-        if news_mine.empty:
-            st.info("你的追蹤清單中的股票尚無新聞資料 -- 請在側邊欄點擊「抓取新聞」。")
+        news = load_csv(os.path.join(config.DATA_DIR, "news", "news.csv"))
+        if news is None:
+            st.info("尚無新聞資料 -- 請在側邊欄點擊「抓取新聞」。")
         else:
-            for _, row in news_mine.iterrows():
-                st.markdown(f"**[{row['title']}]({row['link']})**")
-                st.caption(f"{row['company']} ({row['code']}) · {row['source']} · {row['published']}")
+            my_codes = [s["code"] for s in my_watchlist]
+            news_mine = news[news["code"].isin(my_codes)]
+            if news_mine.empty:
+                st.info("你的追蹤清單中的股票尚無新聞資料 -- 請在側邊欄點擊「抓取新聞」。")
+            else:
+                for _, row in news_mine.iterrows():
+                    st.markdown(f"**[{row['title']}]({row['link']})**")
+                    st.caption(f"{row['company']} ({row['code']}) · {row['source']} · {row['published']}")
