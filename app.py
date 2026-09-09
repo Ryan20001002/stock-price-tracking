@@ -589,8 +589,8 @@ if not my_watchlist:
 else:
     st.caption("我的追蹤清單：" + "、".join(f"{s['code']} {s['name']}" for s in my_watchlist))
 
-tab_overview, tab_prices, tab_institutional, tab_dividends, tab_market_value, tab_ddm, tab_news = st.tabs(
-    ["總覽", "股價", "三大法人", "股利", "市值", "DDM 估值", "新聞"]
+tab_overview, tab_prices, tab_dividends, tab_market_value, tab_ddm, tab_news = st.tabs(
+    ["總覽", "股價", "股利", "市值", "DDM 估值", "新聞"]
 )
 
 # --- Overview ------------------------------------------------------------------
@@ -679,66 +679,31 @@ with tab_prices:
                     use_container_width=True, hide_index=True,
                 )
 
-# --- Institutional investors (三大法人) ---------------------------------------
-
-with tab_institutional:
-    if not my_watchlist:
-        st.info(NO_WATCHLIST_MSG)
-    else:
-        codes = [s["code"] for s in my_watchlist]
-        inst_picked = st.selectbox(
-            "選擇股票代號", codes, format_func=lambda c: f"{c} {watchlist_name(c)}",
-            key="institutional_picked",
-        )
-        inst = load_csv(os.path.join(config.DATA_DIR, "institutional", f"{inst_picked}.csv"))
-        if inst is None:
-            st.info("尚無三大法人買賣超資料 -- 請在側邊欄點擊「抓取三大法人買賣超」。")
-        else:
-            inst["Date"] = pd.to_datetime(inst["Date"])
-            inst = inst.sort_values("Date")
-            min_date = inst["Date"].min().date()
-            max_date = inst["Date"].max().date()
-
-            RANGE_PRESET_DAYS = {"1週": 7, "1個月": 30, "3個月": 91, "6個月": 182, "1年": 365}
-            range_options = list(RANGE_PRESET_DAYS) + ["全部", "自訂..."]
-            range_choice = st.radio(
-                "顯示區間", range_options, index=range_options.index("全部"),
-                horizontal=True, key=f"inst_range_{inst_picked}",
-            )
-
-            if range_choice == "自訂...":
-                col_start, col_end = st.columns(2)
-                start_date = col_start.date_input(
-                    "起始日期", value=min_date, min_value=min_date, max_value=max_date,
-                    key=f"inst_start_{inst_picked}",
-                )
-                end_date = col_end.date_input(
-                    "結束日期", value=max_date, min_value=min_date, max_value=max_date,
-                    key=f"inst_end_{inst_picked}",
-                )
-                if start_date > end_date:
-                    st.warning("起始日期不能晚於結束日期，已自動交換兩者。")
-                    start_date, end_date = end_date, start_date
-            elif range_choice == "全部":
-                start_date, end_date = min_date, max_date
+            # --- 三大法人買賣超, directly below the price chart -- shares the
+            # same ticker (picked) and date range (start_date/end_date) as
+            # the price section above, so there's one selector/range picker
+            # for both instead of a second, separate one.
+            st.divider()
+            st.subheader("三大法人買賣超")
+            inst = load_csv(os.path.join(config.DATA_DIR, "institutional", f"{picked}.csv"))
+            if inst is None:
+                st.info("尚無三大法人買賣超資料 -- 請在側邊欄點擊「抓取三大法人買賣超」。")
             else:
-                end_date = max_date
-                start_date = max(min_date, max_date - pd.Timedelta(days=RANGE_PRESET_DAYS[range_choice]))
-
-            filtered = inst[(inst["Date"].dt.date >= start_date) & (inst["Date"].dt.date <= end_date)]
-            if filtered.empty:
-                st.info("這個區間內沒有三大法人資料，請試試其他區間，或在側邊欄重新抓取。")
-            else:
-                st.caption("外資淨買賣超（股）-- 正值＝淨買超，負值＝淨賣超")
-                render_bar(filtered, "ForeignNet", "外資淨買賣超", color="#e45756")
-                st.caption("投信淨買賣超（股）")
-                render_bar(filtered, "InvestmentTrustNet", "投信淨買賣超", color="#4c78a8")
-                st.caption("自營商淨買賣超（股）")
-                render_bar(filtered, "DealerNet", "自營商淨買賣超", color="#54a24b")
-                st.dataframe(
-                    display_table(filtered.sort_values("Date", ascending=False), labels=INSTITUTIONAL_COLUMNS_ZH),
-                    use_container_width=True, hide_index=True,
-                )
+                inst["Date"] = pd.to_datetime(inst["Date"])
+                inst_filtered = inst[(inst["Date"].dt.date >= start_date) & (inst["Date"].dt.date <= end_date)]
+                if inst_filtered.empty:
+                    st.info("這個區間內沒有三大法人資料，請試試其他區間，或在側邊欄重新抓取。")
+                else:
+                    st.caption("外資淨買賣超（股）-- 正值＝淨買超，負值＝淨賣超")
+                    render_bar(inst_filtered, "ForeignNet", "外資淨買賣超", color="#e45756")
+                    st.caption("投信淨買賣超（股）")
+                    render_bar(inst_filtered, "InvestmentTrustNet", "投信淨買賣超", color="#4c78a8")
+                    st.caption("自營商淨買賣超（股）")
+                    render_bar(inst_filtered, "DealerNet", "自營商淨買賣超", color="#54a24b")
+                    st.dataframe(
+                        display_table(inst_filtered.sort_values("Date", ascending=False), labels=INSTITUTIONAL_COLUMNS_ZH),
+                        use_container_width=True, hide_index=True,
+                    )
             st.caption(
                 "資料來源為證交所三大法人買賣超日報（T86）。外資＝外陸資（不含外資自營商）"
                 "＋外資自營商；投信、自營商為證交所公告的官方合計數字。回溯的時間長度跟"

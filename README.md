@@ -127,16 +127,17 @@ a dashboard in your browser (usually `http://localhost:8501`, opened for
 you automatically). You'll be asked to log in first, create an account,
 or continue as a guest (see "Login and personal watchlists" below -- no
 setup needed, it just works), then you get a tab per data source (Prices,
-三大法人, Dividends, Market value, DDM valuation, News) plus an Overview
-tab with quick per-ticker metrics, all scoped to your own personal
-watchlist. The sidebar has a "我的追蹤清單" section for adding/removing
-tickers from your own list -- see "Editing the watchlist" below.
+Dividends, Market value, DDM valuation, News) plus an Overview tab with
+quick per-ticker metrics, all scoped to your own personal watchlist. The
+sidebar has a "我的追蹤清單" section for adding/removing tickers from your
+own list -- see "Editing the watchlist" below.
 
 The Prices tab shows a candlestick chart (紅漲綠跌, the Taiwan market
 convention -- the opposite of the US red/green) plus a daily volume bar
-chart, both with the same 1週/1個月/3個月/6個月/1年/3年/全部/自訂 date-range
-picker; the 三大法人 tab reuses that same picker for its three net
-buy-sell bar charts (see "Institutional investor net trading" below).
+chart, with a 1週/1個月/3個月/6個月/1年/3年/全部/自訂 date-range picker.
+Directly below that (same tab, same ticker, same date range -- no second
+selector needed) are the three 三大法人買賣超 (外資/投信/自營商 net
+buy-sell) bar charts, see "Institutional investor net trading" below.
 
 `app.py` doesn't contain any data-fetching or calculation logic of its
 own -- it only reads whatever's already in `data/*.csv` and displays it,
@@ -235,9 +236,9 @@ Two lists exist and are kept deliberately separate:
   there's no reason to fetch the same TWSE/yfinance data twice for
   different people.
 - Each account's own **personal watchlist** — which of those tickers
-  *that account* wants to see. Every tab (Overview, Prices, 三大法人,
-  Dividends, Market value, DDM valuation, News) only shows this list, not
-  the full shared registry.
+  *that account* wants to see. Every tab (Overview, Prices, Dividends,
+  Market value, DDM valuation, News) only shows this list, not the full
+  shared registry.
 
 Accounts, password hashes, and personal watchlists all live in one local
 file, `data/users.json` (via `user_store.py` — see its docstring for the
@@ -377,10 +378,11 @@ two sub-columns TWSE publishes (`外陸資買賣超股數(不含外資自營商)
 column; 投信 and 自營商 net are each TWSE's own published aggregate
 column, used as-is rather than re-derived from finer sub-splits.
 
-Saved to `data/institutional/<code>.csv`. In the app, this shows up as
-its own "三大法人" tab with three bar charts (外資/投信/自營商 net
-buy-sell) plus the same 1週/1個月/.../自訂 date-range picker used on the
-Prices tab.
+Saved to `data/institutional/<code>.csv`. In the app, this shows up
+directly below the candlestick/volume charts on the **Prices** tab (not
+a separate tab) -- three bar charts (外資/投信/自營商 net buy-sell) for
+whichever ticker and date range you've already picked there, no second
+selector needed.
 
 ## Keeping data fresh
 
