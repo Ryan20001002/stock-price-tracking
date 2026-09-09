@@ -1,19 +1,65 @@
 """
 Watchlist and shared settings for the Taiwan stock tracker.
 
-Edit WATCHLIST to add/remove companies. `code` is the TWSE stock code
-(4-5 digits, as used on twse.com.tw); `name` is only used for labeling
-files and building news search queries.
+Edit DEFAULT_WATCHLIST below to add/remove companies, or use the "Manage
+watchlist" section in the app.py sidebar -- either way works. `code` is
+the TWSE stock code (4-5 digits, as used on twse.com.tw); `name` is only
+used for labeling files and building news search queries.
+
+WATCHLIST vs DEFAULT_WATCHLIST: WATCHLIST (the name every other script
+imports) is loaded at the bottom of this file from data/watchlist.json if
+that file exists (it's written by app.py's sidebar whenever you add/
+remove a ticker there), otherwise it falls back to DEFAULT_WATCHLIST
+below. So editing DEFAULT_WATCHLIST here is the "permanent code default";
+using the webpage is the "runtime, persists across restarts, no code
+edit" option -- data/watchlist.json (once created) takes priority over
+whatever's written here.
 """
+
+import json
+import os
+
+DATA_DIR = "data"
+WATCHLIST_FILE = os.path.join(DATA_DIR, "watchlist.json")
 
 # A starter watchlist of large, liquid TWSE-listed companies spanning a
 # few sectors. Add your own tickers here (find codes at isin.twse.com.tw
-# or just search "<company name> 股票代號").
-WATCHLIST = [
+# or just search "<company name> 股票代號") -- or use app.py's sidebar
+# instead, which doesn't require editing this file at all.
+DEFAULT_WATCHLIST = [
     {"code": "0050", "name": "元大台灣50", "name_en": "TW0050"},
     {"code": "00878", "name": "國泰永續高股息", "name_en": "TW00878"},
     {"code": "006208", "name": "富邦台50", "name_en": "TW006208"},
 ]
+
+
+def _load_watchlist():
+    if os.path.exists(WATCHLIST_FILE):
+        try:
+            with open(WATCHLIST_FILE, encoding="utf-8") as f:
+                loaded = json.load(f)
+            if loaded:
+                return loaded
+        except (json.JSONDecodeError, OSError):
+            pass  # fall through to the default below
+    return [dict(s) for s in DEFAULT_WATCHLIST]
+
+
+def save_watchlist(watchlist):
+    """Persists `watchlist` to data/watchlist.json (so it survives an app
+    restart) and updates the WATCHLIST list below IN PLACE -- every other
+    script does `from config import WATCHLIST`, which binds to this same
+    list object, so mutating its contents (not rebinding the name) is
+    what makes the change visible to already-imported scripts without
+    reloading anything. Called by app.py's sidebar; you can also call it
+    yourself from a script if you ever want to."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
+        json.dump(watchlist, f, ensure_ascii=False, indent=2)
+    WATCHLIST[:] = watchlist
+
+
+WATCHLIST = _load_watchlist()
 
 # Known stock/ETF splits, manually verified -- used by splits.py.
 # yfinance's own split data for TWSE tickers turned out to be unreliable:
@@ -42,7 +88,8 @@ REQUEST_DELAY_SECONDS = 1.5
 # How many news headlines to keep per company per run.
 NEWS_ITEMS_PER_COMPANY = 15
 
-DATA_DIR = "data"
+# (DATA_DIR is defined near the top of this file, above WATCHLIST_FILE --
+# kept there since WATCHLIST loading needs it before this point.)
 
 # --- Dividend Discount Model (DDM) valuation settings, used by
 # ddm_valuation.py. These are macro/market assumptions, not fetched data

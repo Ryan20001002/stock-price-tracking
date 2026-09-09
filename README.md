@@ -11,6 +11,7 @@ train on.
 ```
 config.py               Watchlist + all settings (edit this, not the scripts below)
 main.py                 Orchestrator: python main.py [--prices] [--dividends] [--news] [--market-value]
+app.py                   Streamlit webpage over everything below: streamlit run app.py
 
 twse_client.py           Shared rate-limited/retrying HTTP client
 price_data.py             Daily OHLC price history (TWSE STOCK_DAY)
@@ -110,13 +111,78 @@ missing from the CSV, so daily/weekly re-runs are fast.
 **Dividends and news** are small enough that each run just re-fetches and
 overwrites the CSV with a fresh snapshot.
 
+## Webpage (Streamlit)
+
+```
+streamlit run app.py
+```
+
+Run this from the project folder, same as the commands above -- it opens
+a dashboard in your browser (usually `http://localhost:8501`, opened for
+you automatically) with a tab per data source (Prices, Dividends, Market
+value, DDM valuation, News) plus an Overview tab with quick per-ticker
+metrics. The sidebar also has a "Watchlist" section for adding/removing
+tickers straight from the page -- see "Editing the watchlist" below.
+
+`app.py` doesn't contain any data-fetching or calculation logic of its
+own -- it only reads whatever's already in `data/*.csv` and displays it,
+and its sidebar buttons call the exact same `run()` functions the
+command-line scripts above use (`price_data.run()`,
+`ddm_valuation.run()`, etc.), so refreshing from the browser does exactly
+what running the matching command in PowerShell does, just with a click.
+Each fetch button hits TWSE/yfinance live and is just as throttled as
+running the script directly, so it can take a little while -- the
+console output each script normally prints is captured and shown in an
+expandable panel under the button, so you're not left staring at a blank
+spinner.
+
+If `data/` is empty (e.g. right after a fresh `git clone`), every tab
+will say so and point at the sidebar button that fills it in. The two
+"Recompute" buttons (dividend prediction, DDM valuation) don't hit the
+network at all -- they just reprocess whatever's already on disk, so
+they're fast and safe to click freely.
+
+**Putting this online:** the setup above runs entirely on your own
+machine. To get a real, shareable URL (useful for showing your
+dissertation committee without your laptop open), the free option is
+[Streamlit Community Cloud](https://streamlit.io/cloud) -- it deploys
+straight from a GitHub repo, which is exactly what you're setting up
+separately. Once this project is pushed to GitHub, deploying there is:
+sign in with your GitHub account, pick this repo and `app.py` as the
+entry point, and it builds and hosts it for you. One thing to check once
+you get there: whether TWSE/yfinance are reachable from Streamlit Cloud's
+servers the same way they are from your own machine -- rate limits and
+network access can behave differently on a hosted service, so the first
+live "Fetch" click there is worth watching closely.
+
 ## Editing the watchlist
 
-Open `config.py` and edit the `WATCHLIST` list — each entry just needs the
-TWSE stock/ETF code, the Chinese name (used to query TWSE prices and
-Google News), and an English name (used for labeling only). You can find a
-code by searching "`<company/ETF name>` 股票代號" or looking it up on
-`isin.twse.com.tw`.
+Two ways to do this, and they both end up in the same place:
+
+- **From the webpage** — `app.py`'s sidebar has a "Watchlist" section at
+  the top: a ✕ button next to each existing ticker, and a small form to
+  add a new one (code, plus optional Chinese/English names). Changes save
+  immediately to `data/watchlist.json` and take effect straight away —
+  every tab and every Fetch button picks up the new list without
+  restarting the app. A newly-added ticker just reads "no data yet" until
+  you click a Fetch button for it.
+- **In code** — open `config.py` and edit `DEFAULT_WATCHLIST`. This is
+  the fallback used the first time you ever run the tool (before
+  `data/watchlist.json` exists); once that file exists (e.g. because
+  you've used the webpage's sidebar at least once), it takes priority
+  over `DEFAULT_WATCHLIST`.
+
+Either way, each entry just needs the TWSE stock/ETF code, the Chinese
+name (used to query TWSE prices and Google News), and an English name
+(used for labeling only). You can find a code by searching "`<company/ETF
+name>` 股票代號" or looking it up on `isin.twse.com.tw`.
+
+`data/watchlist.json` is generated/local state, same as everything else
+under `data/` — it's excluded by the `.gitignore` shipped with this
+project, so it won't get committed to your GitHub repo. That's usually
+what you want (your local watchlist tweaks aren't really "source code"),
+but it does mean a fresh clone starts back at `DEFAULT_WATCHLIST` until
+you add tickers again there.
 
 Other knobs in `config.py`:
 - `PRICE_HISTORY_MONTHS` — how many months of price history to backfill.
