@@ -56,6 +56,7 @@ import io
 import os
 import sys
 import threading
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
@@ -338,26 +339,30 @@ CANDLESTICK_UP_COLOR = "#d64545"    # red -- 漲
 CANDLESTICK_DOWN_COLOR = "#2e7d32"  # green -- 跌
 
 
-# Shared by every chart below: disables Plotly's own click/touch-DRAG zoom
-# and pan on both axes. This is the actual fix for charts "drifting" on
-# mobile (2026-09-10 user report, confirmed via screenshot) -- Plotly's
-# default dragmode ('zoom') treats any click-and-drag on the plot area as a
-# zoom gesture, and on a touchscreen a normal "scroll the page" swipe IS a
-# touch-drag, so it started on the chart, got captured as a zoom-drag
-# instead of a page scroll, and left the chart showing some tiny sliver of
-# a range (visible in the report as a millisecond-scale x-axis) with no
-# obvious way back. fixedrange=True on each axis is the documented Plotly
-# way to keep a chart from intercepting page-scroll gestures at all, and
-# dragmode=False belt-and-suspenders's the same thing at the figure level.
-# NOTE: an earlier attempt (config={"responsive": True} only) did NOT fix
-# this -- that setting addresses resizing on rotation/layout changes, not
-# this drag-capture issue, which is a separate Plotly behavior.
+# Shared by every chart below. History of the mobile touch problem, kept
+# here since the fix escalated twice:
+#   1st report ("plots ruined") -> added config={"responsive": True}. Did
+#      NOT fix it -- that setting only handles resizing on rotation, not
+#      touch capture.
+#   2nd report ("drifts to a weird zoomed range when scrolling", with a
+#      screenshot showing a millisecond-scale x-axis) -> diagnosed as
+#      Plotly's default dragmode='zoom' treating a scroll swipe that starts
+#      on the chart as a zoom-drag. Fixed with fixedrange=True on both axes
+#      + dragmode=False (still set below, as defense in depth).
+#   3rd report ("crashes if you touch the middle of the chart, not the
+#      sides", with an annotated screenshot) -> dragmode=False stops
+#      DRAGGING from zooming, but Plotly can still attach its own
+#      touchstart/touchmove listeners for hover-tracking even when dragging
+#      is disabled, and that was apparently still enough to intercept/desync
+#      the touch and crash the page. staticPlot=True is the actual fix this
+#      time -- it skips attaching ANY JS event listeners to the chart at
+#      all, so a touch that starts on it behaves exactly like touching a
+#      plain image: nothing intercepts it, the browser's native scroll just
+#      takes over immediately. Trade-off: hover tooltips no longer work on
+#      these charts on any device -- acceptable since the exact same
+#      numbers are already in the data table right below every chart.
 _FIXED_AXES = dict(xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True), dragmode=False)
-
-# displayModeBar hidden: those toolbar icons (camera/zoom+-/pan/crosshair/
-# home/fullscreen) floated directly over the chart captions on mobile
-# (also visible in the report) and aren't needed now that drag-zoom is off.
-_MOBILE_CHART_CONFIG = {"responsive": True, "displayModeBar": False, "scrollZoom": False}
+_MOBILE_CHART_CONFIG = {"staticPlot": True, "responsive": True}
 
 
 def render_candlestick(df):
@@ -398,6 +403,63 @@ def render_bar(df, column, label, color="#4c78a8"):
     st.plotly_chart(fig, use_container_width=True, config=_MOBILE_CHART_CONFIG)
 
 
+# --- "Remember me" persistent login (2026-09-10) -----------------------------
+# Fixes the "app crashes/reloads on mobile and I have to log back in every
+# time" complaint at its root: a real browser reload wipes st.session_state
+# entirely, so normally there's nothing left to know who was logged in.
+# This does NOT store the account's password anywhere in the browser --
+# see user_store.py's "Remember me" section for the full design (a random
+# per-login token, only its hash kept on disk, invalidated on logout). Here
+# in app.py, the two things user_store.py can't do itself are: writing the
+# token into an actual browser cookie, and reading that cookie back on a
+# later visit -- Streamlit has no Set-Cookie API, so the write goes through
+# a tiny injected <script> (components.html renders it in an iframe that
+# Streamlit marks allow-same-origin, so document.cookie set there does land
+# in the real page's cookie jar -- a known, if unofficial, pattern for this
+# in the Streamlit community since there's no first-party alternative).
+REMEMBER_COOKIE_NAME = "stock_tracker_remember"
+REMEMBER_COOKIE_MAX_AGE_SECONDS = 30 * 86400
+
+
+def _set_remember_cookie(username, token):
+    value = urllib.parse.quote(f"{username}:{token}")
+    st.components.v1.html(
+        f"""<script>
+        var secure = (window.location.protocol === "https:") ? "; Secure" : "";
+        document.cookie = "{REMEMBER_COOKIE_NAME}={value}; Max-Age={REMEMBER_COOKIE_MAX_AGE_SECONDS}; "
+            + "Path=/; SameSite=Lax" + secure;
+        </script>""",
+        height=0,
+    )
+
+
+def _clear_remember_cookie():
+    st.components.v1.html(
+        f"""<script>
+        document.cookie = "{REMEMBER_COOKIE_NAME}=; Max-Age=0; Path=/; SameSite=Lax";
+        </script>""",
+        height=0,
+    )
+
+
+def _remember_cookie_login():
+    """Tries once per browser session to log someone back in from the
+    "remember me" cookie. Silently does nothing (falls through to the
+    normal login screen) if there's no cookie, it's expired/invalid, or
+    this Streamlit version doesn't expose st.context.cookies (older
+    versions don't -- degrade gracefully rather than crash the app)."""
+    raw_cookie = None
+    if hasattr(st, "context") and hasattr(st.context, "cookies"):
+        raw_cookie = st.context.cookies.get(REMEMBER_COOKIE_NAME)
+    if not raw_cookie:
+        return False
+    cookie_user, sep, cookie_token = urllib.parse.unquote(raw_cookie).rpartition(":")
+    if sep and user_store.verify_remember_token(cookie_user, cookie_token):
+        st.session_state["auth_user"] = cookie_user
+        return True
+    return False
+
+
 # --- Login gate --------------------------------------------------------------
 # Simple username/password accounts, handled entirely by user_store.py (see
 # its docstring for the design and trade-offs) -- no external setup needed.
@@ -409,6 +471,23 @@ if "auth_user" not in st.session_state:
     st.session_state["auth_user"] = None
 if "is_guest" not in st.session_state:
     st.session_state["is_guest"] = False
+if "tried_remember_cookie" not in st.session_state:
+    st.session_state["tried_remember_cookie"] = False
+
+# Only attempted once per browser session (the latch above) -- not reset on
+# logout, deliberately: right after an explicit logout the clearing script
+# may not have run in the browser yet, and re-checking immediately could
+# log the same person right back in against their own action. Deferring to
+# a real page reload (a fresh session, latch reset to False) is fine since
+# the cookie will genuinely be gone by then.
+if (
+    st.session_state["auth_user"] is None
+    and not st.session_state["is_guest"]
+    and not st.session_state["tried_remember_cookie"]
+):
+    st.session_state["tried_remember_cookie"] = True
+    if _remember_cookie_login():
+        st.rerun()
 
 if st.session_state["auth_user"] is None and not st.session_state["is_guest"]:
     st.title("台灣股票追蹤器")
@@ -420,12 +499,22 @@ if st.session_state["auth_user"] is None and not st.session_state["is_guest"]:
         with st.form("login_form"):
             login_username = st.text_input("使用者名稱")
             login_password = st.text_input("密碼", type="password")
+            remember_me = st.checkbox("記住我（這台裝置 30 天內不用重新登入）", value=True)
             if st.form_submit_button("登入", type="primary"):
-                if user_store.verify_login(login_username.strip(), login_password):
-                    st.session_state["auth_user"] = login_username.strip()
+                clean_username = login_username.strip()
+                if user_store.verify_login(clean_username, login_password):
+                    st.session_state["auth_user"] = clean_username
+                    if remember_me:
+                        remember_token = user_store.create_remember_token(clean_username)
+                        if remember_token:
+                            _set_remember_cookie(clean_username, remember_token)
                     st.rerun()
                 else:
                     st.error("使用者名稱或密碼錯誤。")
+        st.caption(
+            "「記住我」的原理：登入時會產生一組隨機的登入權杖存在瀏覽器裡（不是密碼本身），"
+            "手機閃退、斷線或重新整理時可以用它自動幫你登入，登出後這組權杖會立即失效。"
+        )
 
     with tab_signup:
         st.caption("這是很單純的使用者名稱／密碼帳號，沒有 email 驗證或忘記密碼功能，適合自己或小群體使用。")
@@ -515,6 +604,8 @@ if IS_GUEST:
 else:
     st.sidebar.write(f"👤 {USER_NAME}")
     if st.sidebar.button("登出"):
+        user_store.clear_remember_token(USER_NAME)
+        _clear_remember_cookie()
         st.session_state["auth_user"] = None
         st.session_state.pop("personal_codes", None)
         st.rerun()

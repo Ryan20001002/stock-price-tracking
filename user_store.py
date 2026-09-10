@@ -40,12 +40,15 @@ looking AT, never what data gets collected.
 """
 
 import hashlib
+import hmac
 import json
 import os
 import secrets as _secrets
+import time
 
 USERS_FILE = os.path.join("data", "users.json")
 PBKDF2_ITERATIONS = 200_000
+REMEMBER_TOKEN_DAYS = 30
 
 
 def _load_all():
@@ -113,4 +116,74 @@ def save_user_codes(username, codes):
     users = _load_all()
     if username in users:
         users[username]["watchlist_codes"] = codes
+        _save_all(users)
+
+
+# --- "Remember me" persistent login (2026-09-10) -----------------------------
+# Added after a mobile bug report where the app's whole session would reset
+# (a real browser page reload -- mobile pull-to-refresh, a dropped
+# Streamlit connection, etc. -- wipes st.session_state) and force a fresh
+# login every time. This is the standard, secure way to fix that WITHOUT
+# doing what "store the password so I don't have to log in again" would
+# literally mean: the actual password is never written here, and never put
+# in the browser. Instead, on a successful login the account gets a
+# separate random token; only a plain SHA-256 hash of THAT token is saved
+# here (never the raw token), and the raw token itself is put in a browser
+# cookie by app.py. Later, app.py can check "does this cookie's token hash-
+# match what's on file for this username, and hasn't it expired" to log
+# someone back in automatically -- without ever needing their password
+# again, and without this file (or a copy of data/users.json) being enough
+# on its own to log in as anyone (the raw token in the cookie is required,
+# and it's never written to disk anywhere). Logging out invalidates it
+# immediately (clear_remember_token), so a leftover cookie -- browser
+# history, a shared computer -- stops working right away.
+#
+# Deliberately a PLAIN sha256 hash here, not the slow PBKDF2 used for
+# passwords above: the token itself already has 256 bits of randomness
+# from secrets.token_urlsafe(32), so there's no weak-password/dictionary-
+# attack risk a slow hash would defend against -- it only needs to not be
+# trivially reversible if data/users.json ever leaked, which sha256 already
+# gives here.
+
+def create_remember_token(username):
+    """Generates a new "remember me" token for `username`, saves only its
+    hash + an expiry here, and returns the RAW token -- the only time it's
+    ever available in cleartext -- for the caller to store in a browser
+    cookie. Returns None if the account doesn't exist. Overwrites any
+    previous token for this account (logging in with "remember me" on a
+    new browser invalidates the old one)."""
+    users = _load_all()
+    if username not in users:
+        return None
+    token = _secrets.token_urlsafe(32)
+    users[username]["remember_token_hash"] = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    users[username]["remember_token_expires"] = time.time() + REMEMBER_TOKEN_DAYS * 86400
+    _save_all(users)
+    return token
+
+
+def verify_remember_token(username, token):
+    """True if `token` is the current, non-expired "remember me" token for
+    `username`. Used to silently re-authenticate someone whose
+    st.session_state got wiped, without asking for their password again."""
+    if not username or not token:
+        return False
+    user = _load_all().get(username)
+    if user is None:
+        return False
+    stored_hash = user.get("remember_token_hash")
+    expires = user.get("remember_token_expires")
+    if not stored_hash or not expires or time.time() > expires:
+        return False
+    candidate_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    return hmac.compare_digest(stored_hash, candidate_hash)
+
+
+def clear_remember_token(username):
+    """Invalidates this account's "remember me" token (called on explicit
+    logout) so a leftover copy of the cookie can no longer log back in."""
+    users = _load_all()
+    if username in users:
+        users[username].pop("remember_token_hash", None)
+        users[username].pop("remember_token_expires", None)
         _save_all(users)
