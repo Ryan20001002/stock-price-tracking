@@ -113,6 +113,22 @@ st.markdown(
         opacity: 1 !important;
         z-index: 999999 !important;
     }
+    /* (2026-09-10) User report: "sometimes when we scroll, the app shuts
+       down and we have to re-login." This is almost certainly mobile
+       Chrome/Safari's native pull-to-refresh gesture -- overscrolling past
+       the very top (or bottom) of the page is interpreted by the BROWSER
+       itself as "reload this page", which is a genuine navigation, not a
+       Streamlit rerun. A real page reload opens a brand new browser
+       session, so st.session_state (including auth_user/is_guest) is
+       wiped clean -- that's why it looks like the whole app "shut down"
+       and always demands a fresh login afterwards, rather than just
+       glitching visually. overscroll-behavior tells the browser not to
+       treat overscroll as a refresh trigger, while leaving normal
+       in-page scrolling completely untouched. Applied to both html and
+       body since browser support for which element to target varies.*/
+    html, body {
+        overscroll-behavior-y: contain !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
