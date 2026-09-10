@@ -319,10 +319,18 @@ def render_candlestick(df):
     )])
     fig.update_layout(
         xaxis_rangeslider_visible=False,
-        margin=dict(l=10, r=10, t=10, b=10),
-        height=420,
+        # b=40 gives the x-axis date labels enough room on narrow screens;
+        # autosize=True lets Plotly redraw when the container width changes
+        # (e.g. rotating the phone or switching from portrait to landscape).
+        margin=dict(l=10, r=10, t=10, b=40),
+        height=400,
+        autosize=True,
     )
-    st.plotly_chart(fig, use_container_width=True)
+    # responsive=True in config tells Plotly to re-render the SVG whenever
+    # the container resizes -- without this the chart is drawn once at load
+    # time and stays at that fixed pixel width on mobile, which causes the
+    # candlestick wicks and body fills to disappear or overflow.
+    st.plotly_chart(fig, use_container_width=True, config={"responsive": True})
 
 
 def render_bar(df, column, label, color="#4c78a8"):
@@ -330,8 +338,13 @@ def render_bar(df, column, label, color="#4c78a8"):
     range. Renders a simple bar chart -- used for volume and, on the
     institutional-investors tab, net buy/sell by investor type."""
     fig = go.Figure(data=[go.Bar(x=df["Date"], y=df[column], marker_color=color, name=label)])
-    fig.update_layout(margin=dict(l=10, r=10, t=10, b=10), height=200, showlegend=False)
-    st.plotly_chart(fig, use_container_width=True)
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=10, b=40),
+        height=200,
+        showlegend=False,
+        autosize=True,
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"responsive": True})
 
 
 # --- Login gate --------------------------------------------------------------
