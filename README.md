@@ -220,14 +220,18 @@ built-in username/password account, created right there on the login
 screen (a "註冊新帳號" tab next to "登入"). No Google account, no OAuth,
 no external setup of any kind — it works the moment you run `streamlit
 run app.py`. There's also a **guest mode** ("以訪客身分瀏覽") for anyone
-who doesn't want an account: it lets you browse and build a watchlist
-from tickers already known to the app, but that watchlist only lives in
-that browser tab's session state — nothing about a guest is written to
-`data/users.json` or anywhere else on disk, and it's gone the moment the
-tab is closed or "結束訪客模式" is clicked. The one thing guests can't do
-is register a brand-new ticker the app has never seen before (that still
-requires a real account), since doing so writes to the shared
-`config.WATCHLIST` registry.
+who doesn't want an account: it lets you search for and add ANY TWSE
+ticker, including one the app has never seen before, but the resulting
+watchlist only lives in that browser tab's session state — nothing about
+the guest themselves is written to `data/users.json` or anywhere else on
+disk, and it's gone the moment the tab is closed or "結束訪客模式" is
+clicked. Adding a brand-new ticker does write to the shared
+`config.WATCHLIST` registry (same as it would for a logged-in account) —
+that's expanding the public, shared list of tickers the app tracks at
+all, not information about the guest, so it doesn't conflict with the
+"don't store anything about a guest" rule. If a guest adds a ticker
+that's new to the whole app, no data exists for it yet until someone
+(the guest themselves, or anyone else) clicks a "更新資料" fetch button.
 
 Two lists exist and are kept deliberately separate:
 

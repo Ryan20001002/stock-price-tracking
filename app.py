@@ -462,8 +462,8 @@ st.sidebar.title("我的追蹤清單")
 if IS_GUEST:
     st.sidebar.caption(
         "訪客模式下這份清單只存在這次瀏覽階段，不會被儲存，也換不到別台裝置。"
-        "可以自由挑選清單中已經有在追蹤的股票；但新增全新代號（全站第一次出現）"
-        "需要先登入帳號才能做。"
+        "可以搜尋、加入任何台股代碼，包含全站第一次出現的全新代號；如果是全新代號，"
+        "加入後請到下面「更新資料」按一下抓取按鈕，才會開始有資料可以看。"
     )
 else:
     st.sidebar.caption(
@@ -497,19 +497,19 @@ with st.sidebar.form("add_ticker_form", clear_on_submit=True):
             st.sidebar.error("請先輸入股票代號。")
         elif code in st.session_state["personal_codes"]:
             st.sidebar.warning(f"{code} 已經在你的追蹤清單中。")
-        elif IS_GUEST and is_new_to_app:
-            # Registering a ticker the app has never seen before is a
-            # SHARED, persistent change (data/watchlist.json, seen by
-            # every future visitor) -- deliberately not something an
-            # anonymous guest session can trigger. A guest can still add
-            # any ticker already known to the app to their own temporary
-            # list, just not introduce a brand new one.
-            st.sidebar.error(f"{code} 是全新的股票代號，訪客模式無法新增，請先登入帳號。")
         else:
             if is_new_to_app:
                 # Brand new to the whole app -- add it to the shared
                 # registry too, so the Fetch buttons below start pulling
                 # data for it. Other users' personal lists are untouched.
+                #
+                # Guests can trigger this too (2026-09-10, per explicit
+                # request -- "all available stocks to search"): this write
+                # is SHARED/public data (which tickers the app tracks at
+                # all), not information ABOUT the guest, so it doesn't
+                # conflict with guest mode's "don't store anything about
+                # THEM" rule -- that rule covers data/users.json and the
+                # guest's own personal_codes, not the shared registry.
                 new_entry = {
                     "code": code,
                     "name": new_name.strip() or code,
