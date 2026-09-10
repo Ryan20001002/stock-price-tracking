@@ -99,6 +99,20 @@ st.markdown(
         width: 1.25rem !important;
         height: 1.25rem !important;
     }
+    /* The button that expands the sidebar again after it's collapsed (a
+       small arrow, normally fixed near the top-left corner) reportedly
+       disappears on some mobile browsers -- force it to stay visible,
+       on top of everything else, regardless of theme/scroll position.
+       Covers both the current (stSidebarCollapsedControl) and older
+       (collapsedControl) internal testids Streamlit has used for this,
+       since which one applies depends on the Streamlit version. */
+    [data-testid="stSidebarCollapsedControl"],
+    [data-testid="collapsedControl"] {
+        visibility: visible !important;
+        display: flex !important;
+        opacity: 1 !important;
+        z-index: 999999 !important;
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -308,6 +322,28 @@ CANDLESTICK_UP_COLOR = "#d64545"    # red -- 漲
 CANDLESTICK_DOWN_COLOR = "#2e7d32"  # green -- 跌
 
 
+# Shared by every chart below: disables Plotly's own click/touch-DRAG zoom
+# and pan on both axes. This is the actual fix for charts "drifting" on
+# mobile (2026-09-10 user report, confirmed via screenshot) -- Plotly's
+# default dragmode ('zoom') treats any click-and-drag on the plot area as a
+# zoom gesture, and on a touchscreen a normal "scroll the page" swipe IS a
+# touch-drag, so it started on the chart, got captured as a zoom-drag
+# instead of a page scroll, and left the chart showing some tiny sliver of
+# a range (visible in the report as a millisecond-scale x-axis) with no
+# obvious way back. fixedrange=True on each axis is the documented Plotly
+# way to keep a chart from intercepting page-scroll gestures at all, and
+# dragmode=False belt-and-suspenders's the same thing at the figure level.
+# NOTE: an earlier attempt (config={"responsive": True} only) did NOT fix
+# this -- that setting addresses resizing on rotation/layout changes, not
+# this drag-capture issue, which is a separate Plotly behavior.
+_FIXED_AXES = dict(xaxis=dict(fixedrange=True), yaxis=dict(fixedrange=True), dragmode=False)
+
+# displayModeBar hidden: those toolbar icons (camera/zoom+-/pan/crosshair/
+# home/fullscreen) floated directly over the chart captions on mobile
+# (also visible in the report) and aren't needed now that drag-zoom is off.
+_MOBILE_CHART_CONFIG = {"responsive": True, "displayModeBar": False, "scrollZoom": False}
+
+
 def render_candlestick(df):
     """df needs Date/Open/High/Low/Close columns already filtered to the
     desired date range. Renders a candlestick chart -- no return value."""
@@ -318,7 +354,9 @@ def render_candlestick(df):
         name="股價",
     )])
     fig.update_layout(
-        xaxis_rangeslider_visible=False,
+        xaxis=dict(rangeslider=dict(visible=False), fixedrange=True),
+        yaxis=dict(fixedrange=True),
+        dragmode=False,
         # b=40 gives the x-axis date labels enough room on narrow screens;
         # autosize=True lets Plotly redraw when the container width changes
         # (e.g. rotating the phone or switching from portrait to landscape).
@@ -326,11 +364,7 @@ def render_candlestick(df):
         height=400,
         autosize=True,
     )
-    # responsive=True in config tells Plotly to re-render the SVG whenever
-    # the container resizes -- without this the chart is drawn once at load
-    # time and stays at that fixed pixel width on mobile, which causes the
-    # candlestick wicks and body fills to disappear or overflow.
-    st.plotly_chart(fig, use_container_width=True, config={"responsive": True})
+    st.plotly_chart(fig, use_container_width=True, config=_MOBILE_CHART_CONFIG)
 
 
 def render_bar(df, column, label, color="#4c78a8"):
@@ -339,12 +373,13 @@ def render_bar(df, column, label, color="#4c78a8"):
     institutional-investors tab, net buy/sell by investor type."""
     fig = go.Figure(data=[go.Bar(x=df["Date"], y=df[column], marker_color=color, name=label)])
     fig.update_layout(
+        **_FIXED_AXES,
         margin=dict(l=10, r=10, t=10, b=40),
         height=200,
         showlegend=False,
         autosize=True,
     )
-    st.plotly_chart(fig, use_container_width=True, config={"responsive": True})
+    st.plotly_chart(fig, use_container_width=True, config=_MOBILE_CHART_CONFIG)
 
 
 # --- Login gate --------------------------------------------------------------
