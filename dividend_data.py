@@ -11,11 +11,29 @@ amounts with ex-dividend dates rather than resolution-stage records,
 which is also the more directly useful shape for the later prediction
 modeling step.
 
-Each run overwrites the CSV with a fresh full pull (yfinance returns the
-whole history each time; there's no meaningful "incremental" fetch here).
+Skip-if-already-fetched (2026-09-11, by explicit request): a ticker is
+fetched from yfinance AT MOST ONCE, ever -- once a ticker has been
+attempted (successfully or not), run() leaves its saved rows untouched
+on every later call and only fetches tickers new to the watchlist. This
+is a deliberate trade-off, not an accident: yfinance's dividend history
+call always returns the WHOLE history in one shot (there's no "just tell
+me what's new" query to make this incremental the way price_data.py's
+month-by-month or institutional_data.py's day-by-day skipping is), so
+"skip already-covered data" here means skip the ticker entirely rather
+than skip a date range. The real cost is that a genuinely NEW dividend
+payment for an already-fetched ticker will NOT show up on its own --
+pass force=True (or check the "強制重新抓取" box in the app sidebar) to
+re-fetch specific or all tickers when you want a refresh.
+
+"Already fetched" is tracked in data/dividends/_fetched_codes.json (a
+plain list of ticker codes) rather than inferred from whether a ticker
+has any rows in dividends.csv -- inferring it from row presence would
+mean a genuinely zero-dividend ticker (e.g. a brand new ETF) gets
+re-fetched forever, since it never accumulates a row to mark it "done".
 """
 
 import csv
+import json
 import os
 import time
 
@@ -24,6 +42,7 @@ import yfinance as yf
 from config import WATCHLIST, DATA_DIR, REQUEST_DELAY_SECONDS
 
 FIELDNAMES = ["code", "name", "name_en", "symbol", "ex_dividend_date", "dividend_per_share"]
+FETCHED_CODES_FILE = os.path.join(DATA_DIR, "dividends", "_fetched_codes.json")
 
 # Try TWSE (.TW) first; fall back to TPEx/OTC (.TWO) if a ticker has no
 # data under .TW. All of TWSE's main board (including most ETFs) uses
@@ -62,13 +81,62 @@ def fetch_ticker_dividends(code, name, name_en):
     return f"{code}{SUFFIXES_TO_TRY[0]}", []
 
 
-def run():
+def _load_existing_rows():
+    """Return {code: [row dict, ...]} from the existing dividends.csv, or
+    {} if it doesn't exist yet."""
+    out_path = os.path.join(DATA_DIR, "dividends", "dividends.csv")
+    by_code = {}
+    if os.path.exists(out_path):
+        with open(out_path, newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                by_code.setdefault(row["code"], []).append(row)
+    return by_code
+
+
+def _load_fetched_codes():
+    if os.path.exists(FETCHED_CODES_FILE):
+        try:
+            with open(FETCHED_CODES_FILE, encoding="utf-8") as f:
+                return set(json.load(f))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return set()
+
+
+def _save_fetched_codes(codes):
+    os.makedirs(os.path.dirname(FETCHED_CODES_FILE), exist_ok=True)
+    with open(FETCHED_CODES_FILE, "w", encoding="utf-8") as f:
+        json.dump(sorted(codes), f)
+
+
+def run(force=False, codes_to_force=None):
+    """force=True re-fetches EVERY watchlist ticker regardless of what's
+    already on file (the old, pre-2026-09-11 behavior). codes_to_force
+    (an iterable of ticker codes) re-fetches only those specific tickers
+    -- use this for "I know 2330 just declared a new dividend" without
+    paying for every other ticker too. force=True takes priority over
+    codes_to_force if both are given."""
+    existing = _load_existing_rows()
+    fetched_codes = _load_fetched_codes()
+    force_codes = set(codes_to_force or ())
+
     all_rows = []
+    n_skipped = 0
+    n_fetched = 0
     for stock in WATCHLIST:
-        symbol, payments = fetch_ticker_dividends(stock["code"], stock["name"], stock["name_en"])
+        code = stock["code"]
+        already_done = code in fetched_codes and not force and code not in force_codes
+        if already_done:
+            all_rows.extend(existing.get(code, []))
+            n_skipped += 1
+            continue
+
+        symbol, payments = fetch_ticker_dividends(code, stock["name"], stock["name_en"])
+        fetched_codes.add(code)
+        n_fetched += 1
         for date_str, amount in payments:
             all_rows.append({
-                "code": stock["code"],
+                "code": code,
                 "name": stock["name"],
                 "name_en": stock["name_en"],
                 "symbol": symbol,
@@ -84,8 +152,10 @@ def run():
         writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
         writer.writeheader()
         writer.writerows(all_rows)
+    _save_fetched_codes(fetched_codes)
 
-    print(f"  -> saved {len(all_rows)} dividend payments to {out_path}")
+    print(f"  -> saved {len(all_rows)} dividend payments to {out_path} "
+          f"({n_fetched} ticker(s) fetched, {n_skipped} already on file and skipped)")
 
 
 if __name__ == "__main__":

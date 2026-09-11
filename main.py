@@ -59,6 +59,7 @@ expensive backfill on Cloud itself.
 """
 
 import argparse
+import functools
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import price_data
@@ -114,6 +115,12 @@ def main():
     parser.add_argument("--sequential", action="store_true",
                          help="fetch prices/dividends/news one at a time instead of concurrently "
                               "(slower, but keeps console output from interleaving -- handy for debugging)")
+    parser.add_argument("--force", action="store_true",
+                         help="dividends/news only: re-fetch every watchlist ticker even if it's "
+                              "already been fetched before (see dividend_data.py's/news_data.py's "
+                              "docstrings -- 2026-09-11 they skip a ticker entirely once fetched, "
+                              "since neither source supports an incremental 'what's new' query; "
+                              "this flag opts back into the old always-refetch behavior)")
     args = parser.parse_args()
 
     # If no specific flag is given, run the three established fetchers --
@@ -124,9 +131,9 @@ def main():
     if run_all or args.prices:
         jobs.append(("Share prices", price_data.run))
     if run_all or args.dividends:
-        jobs.append(("Dividends", dividend_data.run))
+        jobs.append(("Dividends", functools.partial(dividend_data.run, force=args.force)))
     if run_all or args.news:
-        jobs.append(("News", news_data.run))
+        jobs.append(("News", functools.partial(news_data.run, force=args.force)))
 
     if jobs:
         if args.sequential or len(jobs) == 1:

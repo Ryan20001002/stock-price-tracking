@@ -57,6 +57,7 @@ just say so and point you at the matching sidebar button.
 """
 
 import contextlib
+import functools
 import io
 import os
 import sys
@@ -817,11 +818,26 @@ st.sidebar.caption(
     "PRICE_HISTORY_MONTHS，預設 36 個月，第一次抓可能需要 20-30 分鐘以上，"
     "之後只會補新的交易日，會快很多）："
 )
+
+force_refresh = st.sidebar.checkbox(
+    "強制重新抓取股利／新聞（忽略已抓過的紀錄）",
+    value=False,
+    help=(
+        "股價／流通股數市值／三大法人買賣超一定會自動跳過已經抓過的日期，"
+        "只補新的。但股利／新聞每次都是抓「目前全部」，抓過的股票代號預設"
+        "不會再抓第二次（2026-09-11 起，避免浪費時間重複抓一樣的東西）——"
+        "如果某檔股票剛公告新股利、或想看最新新聞，勾選這裡再按下面的按鈕，"
+        "才會忽略「已經抓過」的紀錄，重新抓一次。"
+    ),
+)
+_dividend_fn = functools.partial(dividend_data.run, force=force_refresh)
+_news_fn = functools.partial(news_data.run, force=force_refresh)
+
 if st.sidebar.button("🔄 一鍵抓取全部資料", use_container_width=True, type="primary"):
     run_parallel_and_log([
         ("抓取股價 (price_data.py)", price_data.run, "prices"),
-        ("抓取股利 (dividend_data.py)", dividend_data.run, "dividends"),
-        ("抓取新聞 (news_data.py)", news_data.run, "news"),
+        ("抓取股利 (dividend_data.py)", _dividend_fn, "dividends"),
+        ("抓取新聞 (news_data.py)", _news_fn, "news"),
     ])
     run_and_log("抓取流通股數／市值 (market_value_data.py)", market_value_data.run, sync_category="market_value")
     run_and_log("抓取三大法人買賣超 (institutional_data.py)", institutional_data.run, sync_category="institutional")
@@ -831,9 +847,9 @@ st.sidebar.caption("或者只更新其中一項：")
 if st.sidebar.button("抓取股價", use_container_width=True):
     run_and_log("抓取股價 (price_data.py)", price_data.run, sync_category="prices")
 if st.sidebar.button("抓取股利", use_container_width=True):
-    run_and_log("抓取股利 (dividend_data.py)", dividend_data.run, sync_category="dividends")
+    run_and_log("抓取股利 (dividend_data.py)", _dividend_fn, sync_category="dividends")
 if st.sidebar.button("抓取新聞", use_container_width=True):
-    run_and_log("抓取新聞 (news_data.py)", news_data.run, sync_category="news")
+    run_and_log("抓取新聞 (news_data.py)", _news_fn, sync_category="news")
 if st.sidebar.button("抓取流通股數／市值", use_container_width=True):
     run_and_log("抓取流通股數／市值 (market_value_data.py)", market_value_data.run, sync_category="market_value")
 if st.sidebar.button("抓取三大法人買賣超", use_container_width=True):

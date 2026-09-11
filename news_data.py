@@ -3,12 +3,28 @@ Fetch recent news headlines for each company in the watchlist via Google
 News' public RSS search feed (no API key required) and save them to
 data/news/news.csv.
 
-Each run overwrites the CSV with a fresh pull of the latest headlines
-(Google News RSS only ever returns "recent" items, so there's nothing
-meaningful to accumulate incrementally without a paid news API).
+Skip-if-already-fetched (2026-09-11, by explicit request): a company's
+news is fetched from Google News AT MOST ONCE, ever -- once a ticker has
+been attempted, run() leaves its saved headlines untouched on every
+later call and only fetches tickers new to the watchlist. This is a
+deliberate trade-off, not an accident: Google News RSS has no "just tell
+me what's new since X" query, only "recent items right now", so unlike
+price_data.py/institutional_data.py's genuine date-range incrementality,
+"skip already-covered data" here means skip the ticker entirely. The
+real cost -- and it's a real one for something called "news" -- is that
+this ticker will never get fresher headlines again on its own; pass
+force=True (or check the "強制重新抓取" box in the app sidebar) to
+re-fetch specific or all tickers when you want current headlines.
+
+"Already fetched" is tracked in data/news/_fetched_codes.json (a plain
+list of ticker codes), not inferred from whether a ticker has any rows
+in news.csv -- a company with genuinely zero matching headlines would
+otherwise be re-fetched forever, since it never accumulates a row to
+mark it "done".
 """
 
 import csv
+import json
 import os
 import time
 import xml.etree.ElementTree as ET
@@ -18,6 +34,7 @@ import requests
 from config import WATCHLIST, NEWS_ITEMS_PER_COMPANY, REQUEST_DELAY_SECONDS, DATA_DIR
 
 RSS_URL = "https://news.google.com/rss/search"
+FETCHED_CODES_FILE = os.path.join(DATA_DIR, "news", "_fetched_codes.json")
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -67,20 +84,71 @@ def fetch_company_news(code, name, name_en):
     return rows
 
 
-def run():
+FIELDNAMES = ["code", "company", "company_en", "published", "source", "title", "link"]
+
+
+def _load_existing_rows():
+    """Return {code: [row dict, ...]} from the existing news.csv, or {}
+    if it doesn't exist yet."""
+    out_path = os.path.join(DATA_DIR, "news", "news.csv")
+    by_code = {}
+    if os.path.exists(out_path):
+        with open(out_path, newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                by_code.setdefault(row["code"], []).append(row)
+    return by_code
+
+
+def _load_fetched_codes():
+    if os.path.exists(FETCHED_CODES_FILE):
+        try:
+            with open(FETCHED_CODES_FILE, encoding="utf-8") as f:
+                return set(json.load(f))
+        except (json.JSONDecodeError, OSError):
+            pass
+    return set()
+
+
+def _save_fetched_codes(codes):
+    os.makedirs(os.path.dirname(FETCHED_CODES_FILE), exist_ok=True)
+    with open(FETCHED_CODES_FILE, "w", encoding="utf-8") as f:
+        json.dump(sorted(codes), f)
+
+
+def run(force=False, codes_to_force=None):
+    """force=True re-fetches EVERY watchlist ticker's news regardless of
+    what's already on file (the old, pre-2026-09-11 behavior).
+    codes_to_force (an iterable of ticker codes) re-fetches only those
+    specific tickers. force=True takes priority over codes_to_force if
+    both are given."""
+    existing = _load_existing_rows()
+    fetched_codes = _load_fetched_codes()
+    force_codes = set(codes_to_force or ())
+
     all_rows = []
+    n_skipped = 0
+    n_fetched = 0
     for stock in WATCHLIST:
-        all_rows.extend(fetch_company_news(stock["code"], stock["name"], stock["name_en"]))
+        code = stock["code"]
+        already_done = code in fetched_codes and not force and code not in force_codes
+        if already_done:
+            all_rows.extend(existing.get(code, []))
+            n_skipped += 1
+            continue
+        all_rows.extend(fetch_company_news(code, stock["name"], stock["name_en"]))
+        fetched_codes.add(code)
+        n_fetched += 1
 
     out_path = os.path.join(DATA_DIR, "news", "news.csv")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    fieldnames = ["code", "company", "company_en", "published", "source", "title", "link"]
     with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
         writer.writeheader()
         writer.writerows(all_rows)
+    _save_fetched_codes(fetched_codes)
 
-    print(f"  -> saved {len(all_rows)} total headlines to {out_path}")
+    print(f"  -> saved {len(all_rows)} total headlines to {out_path} "
+          f"({n_fetched} ticker(s) fetched, {n_skipped} already on file and skipped)")
 
 
 if __name__ == "__main__":

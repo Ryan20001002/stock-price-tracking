@@ -100,7 +100,13 @@ def push_category(category):
     if not os.path.isdir(local_dir):
         return
     for filename in sorted(os.listdir(local_dir)):
-        if not filename.endswith(".csv"):
+        if filename.startswith("."):
+            continue  # skip OS cruft (.DS_Store etc); everything else in
+            # this folder is fetched data, including the small
+            # _fetched_codes.json sidecar dividend_data.py/news_data.py
+            # use to track which tickers they've already fetched
+            # (2026-09-11) -- not just *.csv, so it needs syncing too.
+        if os.path.isdir(os.path.join(local_dir, filename)):
             continue
         with open(os.path.join(local_dir, filename), encoding="utf-8-sig") as f:
             content = f.read()
@@ -150,8 +156,6 @@ def pull_all():
             continue
         local_dir = _local_dir(category)
         for filename in filenames:
-            if not filename.endswith(".csv"):
-                continue
             local_path = os.path.join(local_dir, filename)
             if os.path.exists(local_path):
                 continue  # this container already has it -- don't clobber
