@@ -137,3 +137,14 @@ def run():
 
 if __name__ == "__main__":
     run()
+    # Push to GitHub-backed storage if [github_data] is configured (see
+    # market_data_sync.py) -- no-op otherwise. Added 2026-09-11 so a
+    # standalone `python price_data.py` run also protects its result
+    # from Streamlit Cloud wiping data/ on a container restart, not only
+    # runs through the app's own buttons.
+    import market_data_sync
+    import github_json_store
+    try:
+        market_data_sync.push_category("prices")
+    except github_json_store.GitHubStorageError as e:
+        print(f"[warn] fetched locally, but GitHub backup failed: {e}")

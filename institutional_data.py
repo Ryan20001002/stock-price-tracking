@@ -301,3 +301,17 @@ def run():
 
 if __name__ == "__main__":
     run()
+    # Push to GitHub-backed storage if [github_data] is configured (see
+    # market_data_sync.py) -- no-op otherwise. Added 2026-09-11 after a
+    # full backfill (run exactly this way, per the "more comfortable to
+    # watch in a terminal" recommendation above) completed successfully
+    # but was later found wiped by a Streamlit Cloud container restart --
+    # this is what actually protects that result, and it's also what
+    # lets the deployed app pick it up automatically instead of ever
+    # needing to repeat the expensive backfill there.
+    import market_data_sync
+    import github_json_store
+    try:
+        market_data_sync.push_category("institutional")
+    except github_json_store.GitHubStorageError as e:
+        print(f"[warn] fetched locally, but GitHub backup failed: {e}")

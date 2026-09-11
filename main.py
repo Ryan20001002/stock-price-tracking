@@ -45,6 +45,17 @@ The one downside of running concurrently: console output from different
 scripts can interleave (you might see a price_data line and a news_data
 line next to each other). If you want clean, one-source-at-a-time output
 instead -- e.g. while debugging a specific fetcher -- pass --sequential.
+
+GitHub-backed backup (2026-09-11): if [github_data] is configured in
+.streamlit/secrets.toml (see that file's .example template and
+market_data_sync.py), every category fetched here also gets pushed to
+the same private GitHub repo used for accounts/watchlist right after it
+finishes. This makes running a big backfill (especially --institutional,
+which can take an hour or more) from your own computer the recommended
+way to do it: no risk of Streamlit Cloud recycling the container
+mid-run, and once pushed, the deployed app picks the result up
+automatically the next time it starts -- no need to ever run the
+expensive backfill on Cloud itself.
 """
 
 import argparse
@@ -55,6 +66,27 @@ import dividend_data
 import news_data
 import market_value_data
 import institutional_data
+import market_data_sync
+import github_json_store
+
+
+def _push(category):
+    """Pushes data/<category>/*.csv to GitHub-backed storage if
+    [github_data] is configured in .streamlit/secrets.toml (see
+    market_data_sync.py) -- no-op otherwise. Worth doing even from a
+    plain `python main.py` run, not just the app's fetch buttons: this
+    script's own docstring already recommends running a big
+    --institutional backfill this way (comfortable to watch progress in
+    a terminal, no Streamlit Cloud restart risk mid-run) -- pushing here
+    means that local backfill also becomes what the deployed app picks
+    up automatically next time it starts, without ever needing to repeat
+    the expensive backfill on Cloud at all. Prints a warning rather than
+    raising on failure -- a failed backup shouldn't make an otherwise
+    successful fetch look like it failed."""
+    try:
+        market_data_sync.push_category(category)
+    except github_json_store.GitHubStorageError as e:
+        print(f"[warn] fetched {category} data locally, but GitHub backup failed: {e}")
 
 
 def _run_concurrently(jobs):
@@ -105,16 +137,24 @@ def main():
             names = ", ".join(label for label, _ in jobs)
             print(f"\n=== Fetching concurrently: {names} ===")
             _run_concurrently(jobs)
+        if run_all or args.prices:
+            _push("prices")
+        if run_all or args.dividends:
+            _push("dividends")
+        if run_all or args.news:
+            _push("news")
 
     if args.market_value:
         # Deliberately sequential, after the block above -- see the
         # docstring's "Speed" section for why.
         print("\n=== Shares outstanding + market value ===")
         market_value_data.run()
+        _push("market_value")
 
     if args.institutional:
         print("\n=== 三大法人買賣超 (institutional net buy/sell) ===")
         institutional_data.run()
+        _push("institutional")
 
     print("\nDone. Data saved under ./data/")
 

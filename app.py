@@ -70,6 +70,7 @@ import streamlit as st
 
 import config
 import github_json_store
+import market_data_sync
 import price_data
 import dividend_data
 import news_data
@@ -142,19 +143,33 @@ st.markdown(
 )
 
 
-def run_and_log(label, fn):
+def run_and_log(label, fn, sync_category=None):
     """Runs one of the existing scripts' run() functions, capturing its
     print() output (which would otherwise vanish into the terminal that
     launched streamlit) so it shows up in the browser instead. `label` is
     the Mandarin display name shown in the spinner/expander -- it usually
     also names the underlying .py file so it's easy to cross-reference
-    with the README/command line."""
+    with the README/command line.
+
+    `sync_category` (added 2026-09-11, see market_data_sync.py): if given
+    and `fn()` succeeds, pushes data/<sync_category>/*.csv to GitHub-
+    backed storage right after -- this is what stops a completed fetch
+    from vanishing when Streamlit Cloud later recycles the container. A
+    push failure is shown as a warning, not an error: the fetch itself
+    already succeeded and the data is safely on THIS container's local
+    disk either way, it just won't survive a restart until the next
+    successful push."""
     buf = io.StringIO()
     try:
         with st.spinner(f"正在執行「{label}」-- 這會即時連線 TWSE/yfinance，且刻意放慢速度，可能需要一點時間..."):
             with contextlib.redirect_stdout(buf):
                 fn()
         st.success(f"「{label}」執行完成。")
+        if sync_category:
+            try:
+                market_data_sync.push_category(sync_category)
+            except github_json_store.GitHubStorageError as e:
+                st.warning(f"「{label}」抓到的資料已存在本機，但備份到 GitHub 失敗（重開機/休眠後可能會遺失）：{e}")
     except Exception as e:
         st.error(f"「{label}」執行失敗：{e}")
     log = buf.getvalue()
@@ -211,27 +226,39 @@ def _run_capturing(fn):
 
 
 def run_parallel_and_log(jobs):
-    """jobs: list of (label, fn). Runs every fn() in its own thread AT THE
-    SAME TIME, then shows each one's result once all of them are done.
-    Safe to run together because price_data.py, dividend_data.py, and
-    news_data.py each talk to a DIFFERENT external service (TWSE's legacy
-    price report, yfinance/Yahoo, Google News) -- running them concurrently
-    doesn't send requests any faster to any single one of them
-    (REQUEST_DELAY_SECONDS still throttles each script's own calls exactly
-    as before), it just overlaps the waiting time instead of adding it up.
-    Wall-clock time drops to roughly whichever one is slowest -- usually
-    price history on a first run -- instead of the sum of all of them."""
-    names = "、".join(label for label, _ in jobs)
+    """jobs: list of (label, fn, sync_category). Runs every fn() in its
+    own thread AT THE SAME TIME, then shows each one's result once all of
+    them are done. Safe to run together because price_data.py,
+    dividend_data.py, and news_data.py each talk to a DIFFERENT external
+    service (TWSE's legacy price report, yfinance/Yahoo, Google News) --
+    running them concurrently doesn't send requests any faster to any
+    single one of them (REQUEST_DELAY_SECONDS still throttles each
+    script's own calls exactly as before), it just overlaps the waiting
+    time instead of adding it up. Wall-clock time drops to roughly
+    whichever one is slowest -- usually price history on a first run --
+    instead of the sum of all of them.
+
+    `sync_category` (added 2026-09-11, see run_and_log's docstring and
+    market_data_sync.py) -- pushed to GitHub-backed storage AFTER all
+    jobs finish (sequentially, not concurrently with each other -- these
+    are quick JSON/text API calls, not worth the added complexity of
+    threading too), for every job that succeeded."""
+    names = "、".join(label for label, _, _ in jobs)
     with st.spinner(f"正在同時抓取「{names}」-- 這樣比一個一個抓還快，仍需要一點時間..."):
         with ThreadPoolExecutor(max_workers=len(jobs)) as ex:
-            futures = {ex.submit(_run_capturing, fn): label for label, fn in jobs}
+            futures = {ex.submit(_run_capturing, fn): label for label, fn, _ in jobs}
             results = {futures[f]: f.result() for f in as_completed(futures)}
-    for label, _ in jobs:
+    for label, _, sync_category in jobs:
         log, error = results[label]
         if error:
             st.error(f"「{label}」執行失敗：{error}")
         else:
             st.success(f"「{label}」執行完成。")
+            if sync_category:
+                try:
+                    market_data_sync.push_category(sync_category)
+                except github_json_store.GitHubStorageError as e:
+                    st.warning(f"「{label}」抓到的資料已存在本機，但備份到 GitHub 失敗（重開機/休眠後可能會遺失）：{e}")
         if log:
             with st.expander(f"「{label}」執行紀錄", expanded=False):
                 st.code(log)
@@ -484,6 +511,21 @@ if config.WATCHLIST_LOAD_ERROR:
     # everything else, since it affects both the login screen and guest
     # browsing.
     st.error(f"共用追蹤清單暫時無法從 GitHub 讀取（已暫時改用本機/預設清單）：{config.WATCHLIST_LOAD_ERROR}")
+
+try:
+    # Restores any previously-fetched market-data CSV (prices/dividends/
+    # institutional/market_value/news) that's missing from THIS
+    # container's local disk -- see market_data_sync.py's docstring for
+    # why this exists (2026-09-11: a full institutional-data backfill was
+    # found to survive a completed run but vanish once Streamlit Cloud
+    # recycled the container). A module-level latch inside pull_all()
+    # means this only actually hits GitHub once per running container,
+    # not on every rerun -- cheap to call unconditionally here. Wrapped
+    # defensively: this runs before the login gate, so an unexpected
+    # exception here must never take down the whole app for every user.
+    market_data_sync.pull_all()
+except Exception:
+    pass
 
 # --- Login gate --------------------------------------------------------------
 # Simple username/password accounts, handled entirely by user_store.py (see
@@ -777,25 +819,25 @@ st.sidebar.caption(
 )
 if st.sidebar.button("🔄 一鍵抓取全部資料", use_container_width=True, type="primary"):
     run_parallel_and_log([
-        ("抓取股價 (price_data.py)", price_data.run),
-        ("抓取股利 (dividend_data.py)", dividend_data.run),
-        ("抓取新聞 (news_data.py)", news_data.run),
+        ("抓取股價 (price_data.py)", price_data.run, "prices"),
+        ("抓取股利 (dividend_data.py)", dividend_data.run, "dividends"),
+        ("抓取新聞 (news_data.py)", news_data.run, "news"),
     ])
-    run_and_log("抓取流通股數／市值 (market_value_data.py)", market_value_data.run)
-    run_and_log("抓取三大法人買賣超 (institutional_data.py)", institutional_data.run)
+    run_and_log("抓取流通股數／市值 (market_value_data.py)", market_value_data.run, sync_category="market_value")
+    run_and_log("抓取三大法人買賣超 (institutional_data.py)", institutional_data.run, sync_category="institutional")
     st.sidebar.success("全部資料抓取完成！")
 
 st.sidebar.caption("或者只更新其中一項：")
 if st.sidebar.button("抓取股價", use_container_width=True):
-    run_and_log("抓取股價 (price_data.py)", price_data.run)
+    run_and_log("抓取股價 (price_data.py)", price_data.run, sync_category="prices")
 if st.sidebar.button("抓取股利", use_container_width=True):
-    run_and_log("抓取股利 (dividend_data.py)", dividend_data.run)
+    run_and_log("抓取股利 (dividend_data.py)", dividend_data.run, sync_category="dividends")
 if st.sidebar.button("抓取新聞", use_container_width=True):
-    run_and_log("抓取新聞 (news_data.py)", news_data.run)
+    run_and_log("抓取新聞 (news_data.py)", news_data.run, sync_category="news")
 if st.sidebar.button("抓取流通股數／市值", use_container_width=True):
-    run_and_log("抓取流通股數／市值 (market_value_data.py)", market_value_data.run)
+    run_and_log("抓取流通股數／市值 (market_value_data.py)", market_value_data.run, sync_category="market_value")
 if st.sidebar.button("抓取三大法人買賣超", use_container_width=True):
-    run_and_log("抓取三大法人買賣超 (institutional_data.py)", institutional_data.run)
+    run_and_log("抓取三大法人買賣超 (institutional_data.py)", institutional_data.run, sync_category="institutional")
 
 st.sidebar.divider()
 st.sidebar.caption("以下兩個按鈕只會重新計算已存在的本機資料，速度快，不會連線網路。")
