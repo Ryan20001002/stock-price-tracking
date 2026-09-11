@@ -454,7 +454,16 @@ def _remember_cookie_login():
     if not raw_cookie:
         return False
     cookie_user, sep, cookie_token = urllib.parse.unquote(raw_cookie).rpartition(":")
-    if sep and user_store.verify_remember_token(cookie_user, cookie_token):
+    if not sep:
+        return False
+    try:
+        valid = user_store.verify_remember_token(cookie_user, cookie_token)
+    except user_store.GitHubStorageError:
+        # A GitHub-storage hiccup here shouldn't block anyone from seeing
+        # the normal login screen -- just fall through to it silently,
+        # same as "no cookie" would.
+        return False
+    if valid:
         st.session_state["auth_user"] = cookie_user
         return True
     return False
@@ -502,14 +511,29 @@ if st.session_state["auth_user"] is None and not st.session_state["is_guest"]:
             remember_me = st.checkbox("記住我（這台裝置 30 天內不用重新登入）", value=True)
             if st.form_submit_button("登入", type="primary"):
                 clean_username = login_username.strip()
-                if user_store.verify_login(clean_username, login_password):
+                try:
+                    login_ok = user_store.verify_login(clean_username, login_password)
+                except user_store.GitHubStorageError as e:
+                    # (2026-09-11) A GitHub-storage setup problem (bad
+                    # token, wrong repo permissions, etc) used to crash
+                    # this whole page with a raw, Streamlit-redacted
+                    # traceback -- catching this specific exception type
+                    # shows the actual, actionable reason instead. A real
+                    # bug elsewhere still isn't caught here and crashes
+                    # loudly as normal.
+                    st.error(f"帳號系統暫時無法使用：{e}")
+                    login_ok = None
+                if login_ok:
                     st.session_state["auth_user"] = clean_username
                     if remember_me:
-                        remember_token = user_store.create_remember_token(clean_username)
-                        if remember_token:
-                            _set_remember_cookie(clean_username, remember_token)
+                        try:
+                            remember_token = user_store.create_remember_token(clean_username)
+                            if remember_token:
+                                _set_remember_cookie(clean_username, remember_token)
+                        except user_store.GitHubStorageError:
+                            pass  # login itself already succeeded -- don't block it over "remember me" failing
                     st.rerun()
-                else:
+                elif login_ok is False:
                     st.error("使用者名稱或密碼錯誤。")
         st.caption(
             "「記住我」的原理：登入時會產生一組隨機的登入權杖存在瀏覽器裡（不是密碼本身），"
@@ -526,8 +550,11 @@ if st.session_state["auth_user"] is None and not st.session_state["is_guest"]:
                 if new_password != new_password_confirm:
                     st.error("兩次輸入的密碼不一致。")
                 else:
-                    ok, msg = user_store.create_account(new_username, new_password)
-                    (st.success if ok else st.error)(msg)
+                    try:
+                        ok, msg = user_store.create_account(new_username, new_password)
+                        (st.success if ok else st.error)(msg)
+                    except user_store.GitHubStorageError as e:
+                        st.error(f"帳號系統暫時無法使用：{e}")
 
     st.divider()
     st.caption(
@@ -558,7 +585,16 @@ def _load_personal_codes():
     no account for it to look anything up under."""
     if IS_GUEST:
         return []
-    return user_store.load_user_codes(USER_NAME) or []
+    try:
+        return user_store.load_user_codes(USER_NAME) or []
+    except user_store.GitHubStorageError as e:
+        # Runs once right after login, outside any form -- if GitHub
+        # storage is broken this would otherwise crash the page the
+        # instant someone logs in, with no login screen left to go back
+        # to. Show the error and fall back to an empty watchlist for this
+        # page load rather than taking down the whole app.
+        st.error(f"讀取你的追蹤清單時發生錯誤：{e}")
+        return []
 
 
 if "personal_codes" not in st.session_state:
@@ -575,7 +611,10 @@ def _save_personal_codes():
     guest-specific branch."""
     if IS_GUEST:
         return
-    user_store.save_user_codes(USER_NAME, st.session_state["personal_codes"])
+    try:
+        user_store.save_user_codes(USER_NAME, st.session_state["personal_codes"])
+    except user_store.GitHubStorageError as e:
+        st.error(f"儲存你的追蹤清單時發生錯誤：{e}")
 
 
 def personal_watchlist():
@@ -604,7 +643,10 @@ if IS_GUEST:
 else:
     st.sidebar.write(f"👤 {USER_NAME}")
     if st.sidebar.button("登出"):
-        user_store.clear_remember_token(USER_NAME)
+        try:
+            user_store.clear_remember_token(USER_NAME)
+        except user_store.GitHubStorageError:
+            pass  # still let them log out locally even if this fails
         _clear_remember_cookie()
         st.session_state["auth_user"] = None
         st.session_state.pop("personal_codes", None)

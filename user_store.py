@@ -94,16 +94,62 @@ def _github_headers(token):
     }
 
 
+class GitHubStorageError(RuntimeError):
+    """Raised whenever the GitHub-backed account storage can't be reached
+    or isn't set up correctly (bad token, wrong permissions, wrong repo
+    name, etc). Carries a ready-to-display Mandarin message so app.py can
+    show it with st.error() -- catching this SPECIFIC type (not a bare
+    Exception) is what lets a real bug elsewhere still crash loudly
+    instead of being silently swallowed."""
+
+
+def _github_diagnose(action, exc):
+    """Turns a requests.HTTPError from the GitHub API into a
+    GitHubStorageError with a specific, actionable Mandarin message --
+    added 2026-09-11 after a raw, Streamlit-redacted HTTPError crashed the
+    whole signup page with zero indication of what was actually wrong."""
+    status = exc.response.status_code if exc.response is not None else None
+    detail = ""
+    if exc.response is not None:
+        try:
+            detail = exc.response.json().get("message", "")
+        except Exception:
+            detail = exc.response.text[:200]
+    if status == 401:
+        reason = "GitHub token 無效或已過期 -- 請確認貼進 Secrets 的 token 前後沒有多餘的空白或引號，且尚未過期。"
+    elif status == 403:
+        reason = ("GitHub token 沒有這個 repo 的寫入權限 -- 請確認 Fine-grained token 的 "
+                   "Repository access 有勾選到這個私有 repo，且 Contents 權限設為 Read and write。")
+    elif status == 404:
+        reason = "找不到這個 repo -- 請確認 secrets 裡 repo 的值是「GitHub帳號/repo名稱」的格式，且拼字完全正確。"
+    else:
+        reason = f"GitHub API 回應了非預期的錯誤（狀態碼 {status}）。"
+    message = f"{action}時發生錯誤：{reason}"
+    if detail:
+        message += f"（GitHub 回應：{detail}）"
+    return GitHubStorageError(message)
+
+
 def _github_get(token, repo, path):
     """Returns (users_dict, sha). `sha` is GitHub's current version marker
     for the file -- required to overwrite it without clobbering a
     concurrent write from someone else. ({}, None) if the file doesn't
-    exist yet (the very first account on a freshly created private repo)."""
+    exist yet (the very first account on a freshly created private repo) --
+    NOTE: GitHub also returns 404 (not 403) for a private repo the token
+    can't see at all, so a persistent "no accounts found" right after
+    setup can mean this, not just a genuinely empty store; verify the repo
+    name and token's repo access if that happens."""
     url = f"{GITHUB_API_BASE}/repos/{repo}/contents/{path}"
-    resp = requests.get(url, headers=_github_headers(token), timeout=10)
+    try:
+        resp = requests.get(url, headers=_github_headers(token), timeout=10)
+    except requests.RequestException as e:
+        raise GitHubStorageError(f"連線 GitHub 失敗：{e}") from e
     if resp.status_code == 404:
         return {}, None
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        raise _github_diagnose("讀取帳號資料", e) from e
     payload = resp.json()
     content = base64.b64decode(payload["content"]).decode("utf-8")
     return (json.loads(content) if content.strip() else {}), payload["sha"]
@@ -119,8 +165,16 @@ def _github_put(token, repo, path, users, sha):
     }
     if sha:
         body["sha"] = sha
-    resp = requests.put(url, headers=_github_headers(token), json=body, timeout=10)
-    resp.raise_for_status()
+    try:
+        resp = requests.put(url, headers=_github_headers(token), json=body, timeout=10)
+    except requests.RequestException as e:
+        raise GitHubStorageError(f"連線 GitHub 失敗：{e}") from e
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code == 409:
+            raise  # a stale sha -- let _save_all's retry loop handle this one specifically
+        raise _github_diagnose("寫入帳號資料", e) from e
 
 
 def _load_all_local():
@@ -142,19 +196,21 @@ def _save_all_local(users):
 def _load_all():
     """Every account/watchlist function below calls this -- never
     _load_all_local/_github_get directly -- so this is the one place that
-    decides which storage backend is active."""
+    decides which storage backend is active.
+
+    Deliberately lets GitHubStorageError propagate rather than swallowing
+    it to {} (an earlier version did that, and it was a mistake -- a
+    broken token/repo then silently looked exactly like "no accounts
+    exist yet", which just produces a confusing "wrong username or
+    password" on login instead of the actual, fixable problem). Callers in
+    app.py catch GitHubStorageError specifically and show its message with
+    st.error()."""
     cfg = _github_config()
     if cfg is None:
         return _load_all_local()
     token, repo, path = cfg
-    try:
-        users, _ = _github_get(token, repo, path)
-        return users
-    except requests.RequestException:
-        # A network hiccup or GitHub outage shouldn't crash the whole
-        # page -- fail toward "no accounts found" (the same as a brand
-        # new/empty store), same as any external-service outage would.
-        return {}
+    users, _ = _github_get(token, repo, path)
+    return users
 
 
 def _save_all(users):
