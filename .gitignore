@@ -27,3 +27,11 @@ Claude outputs/
 # this one in particular never gets committed, since it holds password
 # hashes, even though they're salted/hashed rather than plain text.
 data/
+
+# Streamlit secrets -- API tokens, keys, etc. NEVER commit this file.
+# (2026-09-11) Now actually used again: user_store.py's optional
+# GitHub-backed account storage reads a GitHub Personal Access Token from
+# here (see .streamlit/secrets.toml.example for the format). The .example
+# file is intentionally NOT excluded below -- it holds no real secret, and
+# is meant to be committed as a template for whoever sets this up.
+.streamlit/secrets.toml

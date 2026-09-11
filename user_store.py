@@ -1,6 +1,6 @@
 """
 Simple username/password accounts, with each account's personal watchlist
-stored alongside it -- all in one local file, data/users.json.
+stored alongside it -- all in one JSON blob, data/users.json.
 
 This REPLACES an earlier Google-account-login design (Google OAuth client
 + a private Google Sheet via a service account), which needed more manual
@@ -16,18 +16,33 @@ written down rather than silently assumed:
   NOT meant for a public app with untrusted strangers signing up.
 - Passwords are never stored in plain text -- each account gets its own
   random salt, and only a PBKDF2-HMAC-SHA256 hash of the password (never
-  the password itself) is saved to disk. Still, this is a from-scratch,
+  the password itself) is saved. Still, this is a from-scratch,
   non-audited implementation, not a vetted auth library -- don't reuse a
   password here that matters elsewhere (banking, email, etc).
-- Storage is a local file (data/users.json), the same mechanism already
-  used for data/watchlist.json. That means it's excluded by .gitignore
-  (nobody's password hash ends up in the git repo), but -- same as every
-  other file under data/ -- it does NOT survive a Streamlit Community
-  Cloud restart (the app "sleeping" after inactivity, or a redeploy):
-  accounts and personal watchlists created there would need to be
-  recreated after that happens. Running locally, or on an always-on
-  host, this file just persists normally like any other file on disk.
-  See the README's "Login and personal watchlists" section.
+
+Storage backend -- two modes, picked automatically (2026-09-11):
+- **Local file** (data/users.json), the original/default mode, used
+  whenever no [github_data] section exists in Streamlit secrets. Fine when
+  running locally (the file just persists on disk like any other file),
+  but on Streamlit Community Cloud this does NOT survive a redeploy or the
+  app "sleeping" after inactivity and waking back up -- the container's
+  local disk is rebuilt fresh from GitHub each time, and data/ was never
+  part of the git repo (see .gitignore) since it holds password hashes.
+- **GitHub-backed** (recommended for anything deployed on Streamlit
+  Community Cloud that needs accounts to actually persist): reads/writes
+  users.json in a SEPARATE, PRIVATE GitHub repo via GitHub's Contents API,
+  using a token kept in Streamlit secrets -- never in this file, never in
+  git. Chosen over a proper hosted database because it reuses
+  infrastructure already in use for this project (a GitHub account) rather
+  than adding a new service to sign up for and learn, matching the same
+  "avoid unnecessary external setup" reasoning that got Google OAuth
+  replaced with this file in the first place. Turned on by adding a
+  [github_data] section to .streamlit/secrets.toml (locally) or the app's
+  Secrets settings (Streamlit Community Cloud) -- see
+  .streamlit/secrets.toml.example for the exact format and setup steps.
+  MUST be a private repo, and MUST be a different repo than the app's own
+  code repo if that one is public -- writing password hashes into a public
+  repo's history would defeat the point of hashing them at all.
 
 A user's personal watchlist is stored as just a list of ticker CODES
 (e.g. ["0050", "2330"]) -- which of the tickers already known to the app
@@ -39,6 +54,7 @@ separately per person. Logging in only changes what each account is
 looking AT, never what data gets collected.
 """
 
+import base64
 import hashlib
 import hmac
 import json
@@ -46,12 +62,68 @@ import os
 import secrets as _secrets
 import time
 
+import requests
+import streamlit as st
+
 USERS_FILE = os.path.join("data", "users.json")
 PBKDF2_ITERATIONS = 200_000
 REMEMBER_TOKEN_DAYS = 30
+GITHUB_API_BASE = "https://api.github.com"
 
 
-def _load_all():
+def _github_config():
+    """Reads GitHub-backed storage settings from Streamlit secrets --
+    [github_data] with token/repo/path keys (see
+    .streamlit/secrets.toml.example). Returns None if that section isn't
+    configured, which is the signal every function below uses to fall
+    back to the original local-file behavior -- so this feature is purely
+    opt-in and local development/testing without a token keeps working
+    exactly as before."""
+    try:
+        section = st.secrets["github_data"]
+        return section["token"], section["repo"], section.get("path", "users.json")
+    except Exception:
+        return None
+
+
+def _github_headers(token):
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+def _github_get(token, repo, path):
+    """Returns (users_dict, sha). `sha` is GitHub's current version marker
+    for the file -- required to overwrite it without clobbering a
+    concurrent write from someone else. ({}, None) if the file doesn't
+    exist yet (the very first account on a freshly created private repo)."""
+    url = f"{GITHUB_API_BASE}/repos/{repo}/contents/{path}"
+    resp = requests.get(url, headers=_github_headers(token), timeout=10)
+    if resp.status_code == 404:
+        return {}, None
+    resp.raise_for_status()
+    payload = resp.json()
+    content = base64.b64decode(payload["content"]).decode("utf-8")
+    return (json.loads(content) if content.strip() else {}), payload["sha"]
+
+
+def _github_put(token, repo, path, users, sha):
+    url = f"{GITHUB_API_BASE}/repos/{repo}/contents/{path}"
+    body = {
+        "message": "Update users.json",
+        "content": base64.b64encode(
+            json.dumps(users, ensure_ascii=False, indent=2).encode("utf-8")
+        ).decode("utf-8"),
+    }
+    if sha:
+        body["sha"] = sha
+    resp = requests.put(url, headers=_github_headers(token), json=body, timeout=10)
+    resp.raise_for_status()
+
+
+def _load_all_local():
     if not os.path.exists(USERS_FILE):
         return {}
     try:
@@ -61,10 +133,50 @@ def _load_all():
         return {}
 
 
-def _save_all(users):
+def _save_all_local(users):
     os.makedirs(os.path.dirname(USERS_FILE), exist_ok=True)
     with open(USERS_FILE, "w", encoding="utf-8") as f:
         json.dump(users, f, ensure_ascii=False, indent=2)
+
+
+def _load_all():
+    """Every account/watchlist function below calls this -- never
+    _load_all_local/_github_get directly -- so this is the one place that
+    decides which storage backend is active."""
+    cfg = _github_config()
+    if cfg is None:
+        return _load_all_local()
+    token, repo, path = cfg
+    try:
+        users, _ = _github_get(token, repo, path)
+        return users
+    except requests.RequestException:
+        # A network hiccup or GitHub outage shouldn't crash the whole
+        # page -- fail toward "no accounts found" (the same as a brand
+        # new/empty store), same as any external-service outage would.
+        return {}
+
+
+def _save_all(users):
+    cfg = _github_config()
+    if cfg is None:
+        _save_all_local(users)
+        return
+    token, repo, path = cfg
+    # One retry: if someone else wrote in between our read and our write,
+    # GitHub rejects the stale `sha` with a 409 -- refetch it once and try
+    # again rather than losing the write outright. Not built for real
+    # concurrent-write volume, but plenty for this app's traffic (account
+    # creation / login / the occasional watchlist edit).
+    for attempt in range(2):
+        _, sha = _github_get(token, repo, path)
+        try:
+            _github_put(token, repo, path, users, sha)
+            return
+        except requests.HTTPError as e:
+            if attempt == 0 and e.response is not None and e.response.status_code == 409:
+                continue
+            raise
 
 
 def _hash_password(password, salt_hex):
