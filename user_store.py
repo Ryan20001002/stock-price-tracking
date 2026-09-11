@@ -52,9 +52,21 @@ prices, dividends, news, and market value are fetched once and shared
 across every account, since there's no reason to hit TWSE/yfinance
 separately per person. Logging in only changes what each account is
 looking AT, never what data gets collected.
+
+IMPORTANT: config.WATCHLIST itself (the shared registry -- which codes
+exist for ANY account to add) is a SEPARATE file, data/watchlist.json,
+loaded/saved by config.py, not this file. It has its own copy of the
+local-vs-GitHub dual-mode logic (added 2026-09-11, after this file's
+GitHub-backed mode alone turned out to be insufficient: accounts and
+their personal code LISTS persisted fine, but a brand-new ticker added
+via the sidebar -- which gets appended to config.WATCHLIST -- still
+vanished on the next Streamlit Cloud redeploy/wake, silently dropping it
+back out of every account's personal watchlist even though their own
+saved code list still correctly included it). Both this file and
+config.py share the actual GitHub read/write plumbing via
+github_json_store.py rather than duplicating it twice.
 """
 
-import base64
 import hashlib
 import hmac
 import json
@@ -62,13 +74,19 @@ import os
 import secrets as _secrets
 import time
 
-import requests
 import streamlit as st
+
+import github_json_store
 
 USERS_FILE = os.path.join("data", "users.json")
 PBKDF2_ITERATIONS = 200_000
 REMEMBER_TOKEN_DAYS = 30
-GITHUB_API_BASE = "https://api.github.com"
+
+# Re-exported so existing call sites (app.py) that catch
+# `user_store.GitHubStorageError` keep working unchanged -- the actual
+# GitHub read/write logic now lives in github_json_store.py, shared with
+# config.py's watchlist storage (see that module's docstring).
+GitHubStorageError = github_json_store.GitHubStorageError
 
 
 def _github_config():
@@ -84,97 +102,6 @@ def _github_config():
         return section["token"], section["repo"], section.get("path", "users.json")
     except Exception:
         return None
-
-
-def _github_headers(token):
-    return {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-
-
-class GitHubStorageError(RuntimeError):
-    """Raised whenever the GitHub-backed account storage can't be reached
-    or isn't set up correctly (bad token, wrong permissions, wrong repo
-    name, etc). Carries a ready-to-display Mandarin message so app.py can
-    show it with st.error() -- catching this SPECIFIC type (not a bare
-    Exception) is what lets a real bug elsewhere still crash loudly
-    instead of being silently swallowed."""
-
-
-def _github_diagnose(action, exc):
-    """Turns a requests.HTTPError from the GitHub API into a
-    GitHubStorageError with a specific, actionable Mandarin message --
-    added 2026-09-11 after a raw, Streamlit-redacted HTTPError crashed the
-    whole signup page with zero indication of what was actually wrong."""
-    status = exc.response.status_code if exc.response is not None else None
-    detail = ""
-    if exc.response is not None:
-        try:
-            detail = exc.response.json().get("message", "")
-        except Exception:
-            detail = exc.response.text[:200]
-    if status == 401:
-        reason = "GitHub token 無效或已過期 -- 請確認貼進 Secrets 的 token 前後沒有多餘的空白或引號，且尚未過期。"
-    elif status == 403:
-        reason = ("GitHub token 沒有這個 repo 的寫入權限 -- 請確認 Fine-grained token 的 "
-                   "Repository access 有勾選到這個私有 repo，且 Contents 權限設為 Read and write。")
-    elif status == 404:
-        reason = "找不到這個 repo -- 請確認 secrets 裡 repo 的值是「GitHub帳號/repo名稱」的格式，且拼字完全正確。"
-    else:
-        reason = f"GitHub API 回應了非預期的錯誤（狀態碼 {status}）。"
-    message = f"{action}時發生錯誤：{reason}"
-    if detail:
-        message += f"（GitHub 回應：{detail}）"
-    return GitHubStorageError(message)
-
-
-def _github_get(token, repo, path):
-    """Returns (users_dict, sha). `sha` is GitHub's current version marker
-    for the file -- required to overwrite it without clobbering a
-    concurrent write from someone else. ({}, None) if the file doesn't
-    exist yet (the very first account on a freshly created private repo) --
-    NOTE: GitHub also returns 404 (not 403) for a private repo the token
-    can't see at all, so a persistent "no accounts found" right after
-    setup can mean this, not just a genuinely empty store; verify the repo
-    name and token's repo access if that happens."""
-    url = f"{GITHUB_API_BASE}/repos/{repo}/contents/{path}"
-    try:
-        resp = requests.get(url, headers=_github_headers(token), timeout=10)
-    except requests.RequestException as e:
-        raise GitHubStorageError(f"連線 GitHub 失敗：{e}") from e
-    if resp.status_code == 404:
-        return {}, None
-    try:
-        resp.raise_for_status()
-    except requests.HTTPError as e:
-        raise _github_diagnose("讀取帳號資料", e) from e
-    payload = resp.json()
-    content = base64.b64decode(payload["content"]).decode("utf-8")
-    return (json.loads(content) if content.strip() else {}), payload["sha"]
-
-
-def _github_put(token, repo, path, users, sha):
-    url = f"{GITHUB_API_BASE}/repos/{repo}/contents/{path}"
-    body = {
-        "message": "Update users.json",
-        "content": base64.b64encode(
-            json.dumps(users, ensure_ascii=False, indent=2).encode("utf-8")
-        ).decode("utf-8"),
-    }
-    if sha:
-        body["sha"] = sha
-    try:
-        resp = requests.put(url, headers=_github_headers(token), json=body, timeout=10)
-    except requests.RequestException as e:
-        raise GitHubStorageError(f"連線 GitHub 失敗：{e}") from e
-    try:
-        resp.raise_for_status()
-    except requests.HTTPError as e:
-        if e.response is not None and e.response.status_code == 409:
-            raise  # a stale sha -- let _save_all's retry loop handle this one specifically
-        raise _github_diagnose("寫入帳號資料", e) from e
 
 
 def _load_all_local():
@@ -209,7 +136,7 @@ def _load_all():
     if cfg is None:
         return _load_all_local()
     token, repo, path = cfg
-    users, _ = _github_get(token, repo, path)
+    users, _ = github_json_store.read_json(token, repo, path, default={})
     return users
 
 
@@ -219,20 +146,7 @@ def _save_all(users):
         _save_all_local(users)
         return
     token, repo, path = cfg
-    # One retry: if someone else wrote in between our read and our write,
-    # GitHub rejects the stale `sha` with a 409 -- refetch it once and try
-    # again rather than losing the write outright. Not built for real
-    # concurrent-write volume, but plenty for this app's traffic (account
-    # creation / login / the occasional watchlist edit).
-    for attempt in range(2):
-        _, sha = _github_get(token, repo, path)
-        try:
-            _github_put(token, repo, path, users, sha)
-            return
-        except requests.HTTPError as e:
-            if attempt == 0 and e.response is not None and e.response.status_code == 409:
-                continue
-            raise
+    github_json_store.save_with_retry(token, repo, path, users, commit_message="Update users.json")
 
 
 def _hash_password(password, salt_hex):

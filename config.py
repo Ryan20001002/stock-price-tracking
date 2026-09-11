@@ -14,10 +14,29 @@ below. So editing DEFAULT_WATCHLIST here is the "permanent code default";
 using the webpage is the "runtime, persists across restarts, no code
 edit" option -- data/watchlist.json (once created) takes priority over
 whatever's written here.
+
+Storage backend -- two modes, same dual design as user_store.py's
+accounts (2026-09-11), and for the same reason: on Streamlit Community
+Cloud, plain data/watchlist.json does NOT survive a redeploy or the app
+"sleeping" after inactivity and waking back up (the container's local
+disk is rebuilt fresh from GitHub each time). Without this, a ticker
+someone added via the sidebar would silently vanish from EVERY account's
+watchlist the next time the app restarted -- not because their account
+forgot it (data/users.json's GitHub-backed mode already protects that
+part), but because the shared registry itself reset to DEFAULT_WATCHLIST
+below, and app.py drops any saved code that's no longer in this registry.
+Turned on automatically by the same [github_data] secrets section
+user_store.py uses (see .streamlit/secrets.toml.example) -- reuses the
+same token/repo, just a different file in it (`watchlist_path` in that
+section, default "watchlist.json"), so there's no separate setup step.
+Falls back to the local file when that section isn't configured, exactly
+like user_store.py.
 """
 
 import json
 import os
+
+import github_json_store
 
 DATA_DIR = "data"
 WATCHLIST_FILE = os.path.join(DATA_DIR, "watchlist.json")
@@ -33,7 +52,25 @@ DEFAULT_WATCHLIST = [
 ]
 
 
-def _load_watchlist():
+def _github_config():
+    """Same idea as user_store._github_config(), but reads `watchlist_path`
+    instead of `path` -- so this can share the [github_data] section
+    (same token, same private repo) without colliding with users.json.
+    Returns None (falling back to the local file) whenever that section
+    isn't configured, and ALSO if streamlit itself can't be imported --
+    this module is imported by plain `python main.py`-style fetch scripts
+    too, not just app.py, and a missing/broken streamlit install there
+    should degrade to local-file behavior rather than breaking every
+    script that does `from config import WATCHLIST`."""
+    try:
+        import streamlit as st
+        section = st.secrets["github_data"]
+        return section["token"], section["repo"], section.get("watchlist_path", "watchlist.json")
+    except Exception:
+        return None
+
+
+def _load_watchlist_local():
     if os.path.exists(WATCHLIST_FILE):
         try:
             with open(WATCHLIST_FILE, encoding="utf-8") as f:
@@ -45,17 +82,57 @@ def _load_watchlist():
     return [dict(s) for s in DEFAULT_WATCHLIST]
 
 
-def save_watchlist(watchlist):
-    """Persists `watchlist` to data/watchlist.json (so it survives an app
-    restart) and updates the WATCHLIST list below IN PLACE -- every other
-    script does `from config import WATCHLIST`, which binds to this same
-    list object, so mutating its contents (not rebinding the name) is
-    what makes the change visible to already-imported scripts without
-    reloading anything. Called by app.py's sidebar; you can also call it
-    yourself from a script if you ever want to."""
+def _save_watchlist_local(watchlist):
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
         json.dump(watchlist, f, ensure_ascii=False, indent=2)
+
+
+WATCHLIST_LOAD_ERROR = None  # set below if GitHub-backed loading fails; app.py surfaces this
+
+
+def _load_watchlist():
+    global WATCHLIST_LOAD_ERROR
+    cfg = _github_config()
+    if cfg is None:
+        return _load_watchlist_local()
+    token, repo, path = cfg
+    try:
+        loaded, _ = github_json_store.read_json(token, repo, path, default=None)
+    except github_json_store.GitHubStorageError as e:
+        # This runs at IMPORT time (see `WATCHLIST = _load_watchlist()`
+        # below), before app.py has any UI up to show st.error() in, and
+        # this module is also imported by plain fetch scripts (main.py
+        # etc.) with no Streamlit UI at all -- so print for those, stash
+        # the error for app.py to display once it can, and fall back to
+        # the local file/defaults rather than crashing every script's
+        # import of `config`.
+        print(f"[config] 讀取共用追蹤清單失敗，暫時改用本機/預設清單：{e}")
+        WATCHLIST_LOAD_ERROR = str(e)
+        return _load_watchlist_local()
+    return loaded if loaded else [dict(s) for s in DEFAULT_WATCHLIST]
+
+
+def save_watchlist(watchlist):
+    """Persists `watchlist` (GitHub-backed if [github_data] is configured
+    in Streamlit secrets, otherwise data/watchlist.json -- see this
+    module's docstring) and updates the WATCHLIST list below IN PLACE --
+    every other script does `from config import WATCHLIST`, which binds to
+    this same list object, so mutating its contents (not rebinding the
+    name) is what makes the change visible to already-imported scripts
+    without reloading anything. Called by app.py's sidebar; you can also
+    call it yourself from a script if you ever want to.
+
+    Raises github_json_store.GitHubStorageError if GitHub-backed storage
+    is configured but the write fails -- app.py's caller is responsible
+    for catching that and showing it, same as it already does for
+    user_store calls."""
+    cfg = _github_config()
+    if cfg is None:
+        _save_watchlist_local(watchlist)
+    else:
+        token, repo, path = cfg
+        github_json_store.save_with_retry(token, repo, path, watchlist, commit_message="Update watchlist.json")
     WATCHLIST[:] = watchlist
 
 

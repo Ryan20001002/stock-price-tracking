@@ -29,8 +29,13 @@ separate:
 
 - config.WATCHLIST -- the shared/global registry every fetch script reads
   (price_data.py, dividend_data.py, etc.). Adding a ticker here means
-  "start collecting data for this ticker, for everyone." Still backed by
-  data/watchlist.json exactly as before login existed.
+  "start collecting data for this ticker, for everyone." Backed by
+  data/watchlist.json locally, or GitHub-backed (same [github_data]
+  secrets as accounts below) so it survives Streamlit Community Cloud
+  restarts too -- see config.py's docstring; this was added 2026-09-11
+  after tickers added via the sidebar were found to silently disappear
+  from everyone's personal watchlist on the next redeploy/wake, even
+  though accounts themselves already persisted correctly by then.
 - Each logged-in account's PERSONAL watchlist -- just which of the
   tickers already in the shared registry THEY want to see, stored
   per-account in data/users.json via user_store.py (see that module's
@@ -64,6 +69,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 import config
+import github_json_store
 import price_data
 import dividend_data
 import news_data
@@ -469,6 +475,16 @@ def _remember_cookie_login():
     return False
 
 
+if config.WATCHLIST_LOAD_ERROR:
+    # Set by config.py at import time if GitHub-backed watchlist storage
+    # is configured but couldn't be read -- WATCHLIST already silently
+    # fell back to the local file/defaults for this page load, so this is
+    # a heads-up, not a hard stop: some tickers people added may be
+    # temporarily missing until this is fixed. Shown once per run, above
+    # everything else, since it affects both the login screen and guest
+    # browsing.
+    st.error(f"共用追蹤清單暫時無法從 GitHub 讀取（已暫時改用本機/預設清單）：{config.WATCHLIST_LOAD_ERROR}")
+
 # --- Login gate --------------------------------------------------------------
 # Simple username/password accounts, handled entirely by user_store.py (see
 # its docstring for the design and trade-offs) -- no external setup needed.
@@ -712,7 +728,11 @@ with st.sidebar.form("add_ticker_form", clear_on_submit=True):
                     "name": new_name.strip() or code,
                     "name_en": new_name_en.strip() or code,
                 }
-                config.save_watchlist(list(config.WATCHLIST) + [new_entry])
+                try:
+                    config.save_watchlist(list(config.WATCHLIST) + [new_entry])
+                except github_json_store.GitHubStorageError as e:
+                    st.sidebar.error(f"共用追蹤清單儲存失敗，這檔股票暫時無法加入：{e}")
+                    st.stop()
             st.session_state["personal_codes"] = st.session_state["personal_codes"] + [code]
             _save_personal_codes()
             st.rerun()
