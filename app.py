@@ -708,13 +708,30 @@ with st.sidebar.form("add_ticker_form", clear_on_submit=True):
         is_new_to_app = not any(s["code"] == code for s in config.WATCHLIST)
         if not code:
             st.sidebar.error("請先輸入股票代號。")
-        elif code in st.session_state["personal_codes"]:
+        elif code in st.session_state["personal_codes"] and not is_new_to_app:
+            # Genuinely already added AND still visible -- nothing to do.
+            # The `and not is_new_to_app` half matters: a code can be in
+            # personal_codes but have fallen OUT of config.WATCHLIST (e.g.
+            # a shared-registry reset before the watchlist GitHub-backed
+            # fix existed, 2026-09-11) -- personal_watchlist() then
+            # silently drops it, so it's invisible in the sidebar list
+            # even though it's "already in personal_codes". Before this
+            # fix, that state was a dead end: this same warning would fire
+            # every time, telling the user it's already there while never
+            # showing it or letting them re-add it. Falling through to
+            # the else branch below instead re-creates the missing
+            # config.WATCHLIST entry and makes it visible again.
             st.sidebar.warning(f"{code} 已經在你的追蹤清單中。")
         else:
             if is_new_to_app:
-                # Brand new to the whole app -- add it to the shared
-                # registry too, so the Fetch buttons below start pulling
-                # data for it. Other users' personal lists are untouched.
+                # Either genuinely brand new to the whole app, OR a
+                # "repair" of the orphaned-code state described above (the
+                # code is already in this account's personal_codes but
+                # missing from config.WATCHLIST) -- either way, the fix is
+                # the same: (re-)add it to the shared registry so the
+                # Fetch buttons below start pulling data for it again and
+                # personal_watchlist() stops filtering it out. Other
+                # users' personal lists are untouched.
                 #
                 # Guests can trigger this too (2026-09-10, per explicit
                 # request -- "all available stocks to search"): this write
@@ -733,8 +750,9 @@ with st.sidebar.form("add_ticker_form", clear_on_submit=True):
                 except github_json_store.GitHubStorageError as e:
                     st.sidebar.error(f"共用追蹤清單儲存失敗，這檔股票暫時無法加入：{e}")
                     st.stop()
-            st.session_state["personal_codes"] = st.session_state["personal_codes"] + [code]
-            _save_personal_codes()
+            if code not in st.session_state["personal_codes"]:
+                st.session_state["personal_codes"] = st.session_state["personal_codes"] + [code]
+                _save_personal_codes()
             st.rerun()
 
 st.sidebar.divider()
