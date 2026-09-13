@@ -4,113 +4,167 @@ investor groups -- 外資 (foreign investors), 投信 (investment trusts), and
 自營商 (securities dealers) -- for each ticker in the watchlist, and keep a
 running CSV per ticker under data/institutional/<code>.csv.
 
-Backfill window: deliberately kept IDENTICAL to price_data.py's, i.e. the
-same PRICE_HISTORY_MONTHS calendar months back from today (per explicit
-user request, 2026-09-09, to keep the two histories aligned) -- see
+Backfill window: kept IDENTICAL to price_data.py's, i.e. the same
+PRICE_HISTORY_MONTHS calendar months back from today (per explicit user
+request, 2026-09-09, to keep the two histories aligned) -- see
 _history_start_date() below, which reconstructs the exact same "N months
-back" starting point price_data.py's _month_starts() uses, then this
-walks forward one calendar day at a time (skipping weekends) rather than
-one calendar month at a time.
+back" starting point price_data.py's _month_starts() uses.
 
-**This makes a first-time full backfill expensive.** Data source: TWSE's
-T86 report ("三大法人買賣超日報") is shaped differently from
-price_data.py's STOCK_DAY report -- T86 returns EVERY listed stock for
-ONE calendar day per call, rather than one stock for one month. That
-means a full historical backfill costs roughly one network request PER
-TRADING DAY (not per ticker, and not per month) -- at the default
-PRICE_HISTORY_MONTHS=36 (3 years), that's on the order of 700-780 trading
-days, i.e. 700-780 requests. At REQUEST_DELAY_SECONDS=1.5 that's a floor
-of roughly 20-30 minutes for the very first run (network latency and any
-retries add more on top). Every run AFTER the first is cheap again --
-same incremental design as price_data.py: a calendar date already saved
-for every watchlist ticker is skipped without a network call, so daily
-re-runs only fetch the handful of new trading days since last time.
+Data source (2026-09-13, by explicit request after "the institutional
+fetch is too slow"): FinMind's TaiwanStockInstitutionalInvestorsBuySell
+dataset, via finmind_client.py -- see that module's docstring for the
+full rationale and the accuracy trade-off (FinMind is a third-party
+aggregator, not TWSE directly). This REPLACES this script's original
+approach, which called TWSE's own T86 report ("三大法人買賣超日報")
+directly. That's not being deleted out of caution -- it's gone -- because
+the two produce the same CSV output shape and the whole point of the
+switch is to stop paying T86's cost structure:
 
-Because of that first-run cost, running this via `python
-institutional_data.py` directly (so you can watch its progress in a
-terminal) is more comfortable for the first backfill than clicking the
-button in the app and waiting on a spinner -- though the app's "🔄 一鍵
-抓取全部資料" button does include it (fetched last, sequentially, see
-app.py), and there's also a standalone "抓取三大法人買賣超" button.
+    TWSE's T86 report returns EVERY listed stock for ONE calendar day per
+    call, so a full historical backfill cost roughly one network request
+    PER TRADING DAY (not per ticker) -- at PRICE_HISTORY_MONTHS=36 (3
+    years), that was 700-780 requests, throttled at
+    REQUEST_DELAY_SECONDS=1.5s each (TWSE blocks IPs that go faster) --
+    a floor of 20-30+ minutes for a first backfill, matching what was
+    reported live ("broken when we let it run for an hour").
 
-Field names are looked up BY NAME from the "fields" array TWSE returns in
-each response, never by hard-coded position -- TWSE has changed column
-order/wording in this report before. Verified live against the real TWSE
-endpoint (2026-09-09).
+    FinMind's dataset is queried the other way around: one call per
+    TICKER covers an entire date range in one shot. For this project's
+    watchlist (a handful of tickers, not hundreds), that turns a 3-year
+    backfill into a handful of requests total -- seconds, not tens of
+    minutes -- and every incremental re-run after the first is now also
+    just one small request per ticker (covering only the new days since
+    last time), rather than a full day-by-day scan to find out which
+    ones are missing.
 
-    外資 (foreign investors) net = "外陸資買賣超股數(不含外資自營商)"
-                                  + "外資自營商買賣超股數"
-        (TWSE does not publish a single combined "外資" column; if a
-        future response ever does include one under a recognizable name,
-        _extract_foreign_net() below will use it directly instead.)
-    投信 (investment trust) net  = "投信買賣超股數"                (official, used as-is)
-    自營商 (dealer) net          = "自營商買賣超股數"              (official aggregate --
-        deliberately NOT re-derived by summing the "自行買賣"/"避險"
-        sub-columns; TWSE's own aggregate is the one to trust)
-    三大法人合計 (all three combined), when present, is saved too under
-    "ThreeInstitutionsNet" for convenience, straight from
-    "三大法人買賣超股數" -- also not re-derived.
+FinMind's response is "long" format: one row per (date, stock_id,
+investor-category, buy, sell) rather than one row per date with named
+net columns, and categories vary by era (see CATEGORY constants below --
+自營商's self-trading/hedging split only exists from 2014-12-01, foreign
+investors' dealer-arm split only from 2018-01-15; before those dates a
+single merged category is used instead). This module aggregates that
+long format into the same wide per-day shape the rest of the app already
+expects (Date, ForeignNet, InvestmentTrustNet, DealerNet,
+ThreeInstitutionsNet), matching the same definitions the old TWSE-based
+version used:
+
+    外資 (foreign investors) net = Foreign_Investor (excl. dealer arm)
+                                  + Foreign_Dealer_Self (from 2018-01-15)
+    投信 (investment trust) net  = Investment_Trust
+    自營商 (dealer) net          = Dealer_self + Dealer_Hedging (from
+                                    2014-12-01) OR the single merged
+                                    Dealer category before that date
+    三大法人合計 (all three combined) = the sum of the three above
+                                       (FinMind doesn't publish this as
+                                       its own field the way TWSE's T86
+                                       did, so it's derived here --
+                                       exactly matching the definition,
+                                       not an approximation)
 
 Every value is a NET number of shares for that day (positive = net
-bought, negative = net sold), not a running total.
+bought, negative = net sold), not a running total -- unchanged from
+before.
+
+NOT YET VERIFIED AGAINST LIVE DATA -- see finmind_client.py's docstring.
+The first real run against your actual watchlist is the real test;
+worth spot-checking a recent date for one ticker against TWSE's own
+T86 report directly (https://www.twse.com.tw/zh/trading/fund/T86.html)
+to confirm the numbers line up before trusting a full backfill.
 """
 
 import csv
 import os
-from datetime import date, timedelta
+from collections import defaultdict
+from datetime import date
 
 from config import WATCHLIST, DATA_DIR, PRICE_HISTORY_MONTHS
-from twse_client import get_json
+import finmind_client
 
-T86_URL = "https://www.twse.com.tw/rwd/zh/fund/T86"
+FINMIND_DATASET = "TaiwanStockInstitutionalInvestorsBuySell"
 
 FIELDNAMES = ["Date", "ForeignNet", "InvestmentTrustNet", "DealerNet", "ThreeInstitutionsNet"]
 
-# Field-name candidates within the T86 response, in priority order.
-CODE_FIELD_CANDIDATES = ["證券代號"]
-FOREIGN_COMBINED_CANDIDATES = ["外資買賣超股數", "外資及陸資買賣超股數"]
-FOREIGN_EXCL_DEALER_CANDIDATES = ["外陸資買賣超股數(不含外資自營商)", "外資買賣超股數(不含外資自營商)"]
-FOREIGN_DEALER_CANDIDATES = ["外資自營商買賣超股數"]
-TRUST_CANDIDATES = ["投信買賣超股數"]
-DEALER_CANDIDATES = ["自營商買賣超股數"]
-THREE_TOTAL_CANDIDATES = ["三大法人買賣超股數"]
+# FinMind's investor-category names for this dataset (see module
+# docstring) -- summed per group to match the same 外資/投信/自營商
+# definitions the old TWSE-based version used.
+FOREIGN_CATEGORIES = ("Foreign_Investor", "Foreign_Dealer_Self")
+TRUST_CATEGORIES = ("Investment_Trust",)
+DEALER_SPLIT_CATEGORIES = ("Dealer_self", "Dealer_Hedging")
+DEALER_MERGED_CATEGORY = "Dealer"  # pre-2014-12-01 (and some OTC rows) use this single category instead of the split ones above
 
 
-def _num(s):
-    """Parse a TWSE numeric field ('1,234', '-987', '--', '') into an int/float or None."""
-    if s is None:
-        return None
-    s = str(s).strip().replace(",", "")
-    if s in ("", "--", "X"):
+def _num(x):
+    """Parse a FinMind buy/sell value into an int/float, or None if
+    missing/unparseable. FinMind's docs show plain ints, but this stays
+    defensive the same way twse_client-based parsing did, in case a row
+    ever comes back as a string or with a placeholder value."""
+    if x is None:
         return None
     try:
-        return int(s)
-    except ValueError:
+        return int(x)
+    except (TypeError, ValueError):
         try:
-            return float(s)
-        except ValueError:
+            return float(x)
+        except (TypeError, ValueError):
             return None
 
 
-def _first_present(fields, candidates):
-    """Return the first name in `candidates` that appears in `fields`, or None."""
-    field_set = set(fields)
-    for name in candidates:
-        if name in field_set:
-            return name
-    return None
+def _aggregate_day_rows(rows):
+    """rows: every FinMind row for ONE (ticker, date) -- one dict per
+    investor category, each with "name"/"buy"/"sell". Returns a dict
+    with the four wide columns this module has always written (see
+    module docstring for the category-grouping definitions). A category
+    absent for this date (e.g. Foreign_Dealer_Self before 2018-01-15)
+    simply contributes 0, which is correct -- there's nothing to add,
+    not a missing/unknown value."""
+    net_by_name = {}
+    for row in rows:
+        buy, sell = _num(row.get("buy")), _num(row.get("sell"))
+        if buy is None and sell is None:
+            continue
+        net_by_name[row.get("name")] = (buy or 0) - (sell or 0)
+
+    foreign = sum(net_by_name.get(name, 0) for name in FOREIGN_CATEGORIES)
+    trust = sum(net_by_name.get(name, 0) for name in TRUST_CATEGORIES)
+    dealer = sum(net_by_name.get(name, 0) for name in DEALER_SPLIT_CATEGORIES) \
+        + net_by_name.get(DEALER_MERGED_CATEGORY, 0)
+    return {
+        "ForeignNet": foreign,
+        "InvestmentTrustNet": trust,
+        "DealerNet": dealer,
+        "ThreeInstitutionsNet": foreign + trust + dealer,
+    }
 
 
-def _extract_foreign_net(row, idx):
-    """外資 net buy/sell for one row. Prefers a single combined column if
-    TWSE ever publishes one; otherwise sums the two documented sub-columns."""
-    if "combined" in idx:
-        return _num(row[idx["combined"]])
-    excl = _num(row[idx["excl_dealer"]]) if "excl_dealer" in idx else None
-    dealer_arm = _num(row[idx["dealer_arm"]]) if "dealer_arm" in idx else None
-    if excl is None and dealer_arm is None:
+def fetch_ticker_institutional(code, start_date, end_date):
+    """Returns {iso_date: {ForeignNet, InvestmentTrustNet, DealerNet,
+    ThreeInstitutionsNet}} for this ticker over [start_date, end_date]
+    (inclusive), or None if the FinMind request ultimately failed after
+    retries (see finmind_client.get_json). An empty dict (not None)
+    means the request succeeded but returned no rows at all -- e.g. the
+    range is entirely non-trading days, or FinMind has no data for this
+    ticker yet."""
+    payload = finmind_client.get_json({
+        "dataset": FINMIND_DATASET,
+        "data_id": code,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+    })
+    if payload is None:
         return None
-    return (excl or 0) + (dealer_arm or 0)
+    rows = payload.get("data")
+    if not isinstance(rows, list):
+        print(f"  [warn] {code}: FinMind response had no usable \"data\" list, treating as empty")
+        return {}
+
+    rows_by_date = defaultdict(list)
+    for row in rows:
+        iso_date = row.get("date")
+        if iso_date:
+            rows_by_date[iso_date].append(row)
+
+    return {iso_date: dict(_aggregate_day_rows(day_rows), Date=iso_date)
+            for iso_date, day_rows in rows_by_date.items()}
 
 
 def _csv_path(code):
@@ -156,146 +210,61 @@ def _history_start_date():
     return date(y, m, 1)
 
 
-def _recent_calendar_dates():
-    """Yield ISO date strings from _history_start_date() through today
-    (oldest first), skipping Saturdays/Sundays -- T86 has nothing on
-    those, so no point spending a request finding that out. Public
-    holidays still cost one wasted request each (same trade-off
-    price_data.py accepts for unlisted months)."""
-    d = _history_start_date()
-    today = date.today()
-    out = []
-    while d <= today:
-        if d.weekday() < 5:  # Mon=0 .. Fri=4
-            out.append(d.isoformat())
-        d += timedelta(days=1)
-    return out
-
-
 def run():
     os.makedirs(os.path.join(DATA_DIR, "institutional"), exist_ok=True)
-    codes = [s["code"] for s in WATCHLIST]
-    if not codes:
+    if not WATCHLIST:
         print("[institutional] watchlist is empty -- nothing to do")
         return
 
-    existing = {code: _load_existing(code) for code in codes}
-    watchlist_codes = {c.strip() for c in codes}
-    target_dates = _recent_calendar_dates()
+    history_floor = _history_start_date()
+    today = date.today()
 
-    dates_needing_a_request = sum(
-        1 for iso_date in target_dates if not all(iso_date in existing[code] for code in codes)
-    )
-    if dates_needing_a_request > 30:
-        # A first-time full backfill at the default PRICE_HISTORY_MONTHS
-        # (aligned with price_data.py's window, per user request) is on
-        # the order of 700+ requests -- tell the user up front rather
-        # than leaving them wondering if the button is stuck.
-        est_minutes = dates_needing_a_request * 1.5 / 60
-        print(f"[institutional] {dates_needing_a_request} day(s) need fetching -- "
-              f"at ~1.5s/request that's at least ~{est_minutes:.0f} minute(s), likely more "
-              f"with network latency/retries. This is a one-time cost; re-runs only fetch new days.")
+    n_fetched = 0      # made a FinMind request and got at least one day back
+    n_up_to_date = 0    # already had today's date on file -- no request needed
+    n_empty = 0         # request succeeded but returned zero rows
+    n_failed = 0        # FinMind request failed after retries
 
-    fetched_days = 0       # got a stat=="OK" response with at least one watchlist row matched
-    skipped_days = 0       # every watchlist ticker already had this date on file, no request made
-    no_trading_days = 0    # request succeeded but TWSE says stat != "OK" (weekend/holiday/not published yet)
-    request_failed_days = 0  # get_json gave up after retries (network issue / TWSE blocking us)
-    unmatched_days = 0     # stat == "OK" but none of OUR watchlist codes appeared in that day's data
-    requests_made = 0
-
-    for iso_date in target_dates:
-        if all(iso_date in existing[code] for code in codes):
-            skipped_days += 1
-            continue  # every watchlist ticker already has this day on file
-
-        date_param = iso_date.replace("-", "")
-        payload = get_json(T86_URL, params={"date": date_param, "selectType": "ALL", "response": "json"})
-        requests_made += 1
-        if requests_made % 20 == 0:
-            # A full backfill can now run for 20-30+ minutes (see the
-            # module docstring) -- checkpoint progress to disk periodically
-            # so an interrupted run (closed browser tab, killed terminal)
-            # doesn't lose everything fetched so far, and print a progress
-            # line since otherwise there'd be long silent stretches.
-            for code in codes:
-                _write_csv(code, existing[code])
-            print(f"  ... {requests_made}/{dates_needing_a_request} request(s) made so far "
-                  f"({fetched_days} fetched, {request_failed_days} failed, {no_trading_days} non-trading, "
-                  f"{unmatched_days} unmatched) -- progress saved to disk")
-        if payload is None:
-            request_failed_days += 1
-            continue  # get_json already printed a warning per retry; move on to the next date
-        if payload.get("stat") != "OK":
-            no_trading_days += 1
-            continue  # weekend, holiday, or no data published yet for today
-
-        fields = payload.get("fields") or []
-        code_field = _first_present(fields, CODE_FIELD_CANDIDATES)
-        if code_field is None:
-            print(f"  [warn] {iso_date}: couldn't find the stock-code column in T86 response, skipping")
+    for stock in WATCHLIST:
+        code = stock["code"]
+        existing = _load_existing(code)
+        # Always re-fetch from the latest date already on file (not the
+        # day after it) rather than just from history_floor once
+        # something's cached -- same "the most recent unit on file might
+        # have been partial/since-revised" reasoning price_data.py uses
+        # for its latest month, cheap here since it only adds a few days
+        # to one request's range, not a whole extra request.
+        start = max(history_floor, date.fromisoformat(max(existing))) if existing else history_floor
+        if start > today:
+            n_up_to_date += 1
             continue
 
-        idx = {"code": fields.index(code_field)}
-        combined_field = _first_present(fields, FOREIGN_COMBINED_CANDIDATES)
-        excl_field = _first_present(fields, FOREIGN_EXCL_DEALER_CANDIDATES)
-        dealer_arm_field = _first_present(fields, FOREIGN_DEALER_CANDIDATES)
-        trust_field = _first_present(fields, TRUST_CANDIDATES)
-        dealer_field = _first_present(fields, DEALER_CANDIDATES)
-        three_field = _first_present(fields, THREE_TOTAL_CANDIDATES)
+        print(f"[institutional] {code} {stock['name']}: fetching {start.isoformat()} ~ {today.isoformat()} from FinMind")
+        by_date = fetch_ticker_institutional(code, start, today)
+        if by_date is None:
+            n_failed += 1
+            print(f"  [warn] {code}: FinMind request failed after retries -- "
+                  f"keeping the {len(existing)} day(s) already on file")
+            continue
+        if not by_date:
+            n_empty += 1
+            print(f"  -> {code}: FinMind returned no rows for this range")
+            continue
 
-        if combined_field:
-            idx["combined"] = fields.index(combined_field)
-        if excl_field:
-            idx["excl_dealer"] = fields.index(excl_field)
-        if dealer_arm_field:
-            idx["dealer_arm"] = fields.index(dealer_arm_field)
+        existing.update(by_date)
+        _write_csv(code, existing)
+        n_fetched += 1
+        print(f"  -> {code}: {len(by_date)} day(s) fetched/updated, {len(existing)} day(s) total on file")
 
-        matched_this_day = 0
-        for row in payload.get("data", []):
-            code = str(row[idx["code"]]).strip()
-            if code not in watchlist_codes:
-                continue
-            matched_this_day += 1
-            existing[code][iso_date] = {
-                "Date": iso_date,
-                "ForeignNet": _extract_foreign_net(row, idx),
-                "InvestmentTrustNet": _num(row[fields.index(trust_field)]) if trust_field else None,
-                "DealerNet": _num(row[fields.index(dealer_field)]) if dealer_field else None,
-                "ThreeInstitutionsNet": _num(row[fields.index(three_field)]) if three_field else None,
-            }
-        if matched_this_day:
-            fetched_days += 1
-        else:
-            unmatched_days += 1
-            print(f"  [warn] {iso_date}: TWSE returned {len(payload.get('data', []))} stocks "
-                  f"but none matched our watchlist codes {sorted(watchlist_codes)}")
+    print(f"[institutional] {n_fetched} ticker(s) fetched from FinMind, {n_up_to_date} already up to date, "
+          f"{n_empty} returned no rows, {n_failed} request(s) failed")
 
-    for code in codes:
-        _write_csv(code, existing[code])
-
-    print(f"[institutional] {fetched_days} day(s) fetched, {skipped_days} already on file for every ticker, "
-          f"{no_trading_days} non-trading day(s), {request_failed_days} request(s) failed, "
-          f"{unmatched_days} day(s) with no watchlist match")
-    for code in codes:
-        print(f"  -> {code}: {len(existing[code])} days saved")
-
-    total_rows_saved = sum(len(v) for v in existing.values())
-    if total_rows_saved == 0 and target_dates:
-        if request_failed_days > 0:
-            raise RuntimeError(
-                f"TWSE 完全沒有回應任何一天的三大法人資料（{request_failed_days} 次請求全部失敗）-- "
-                "很可能是暫時被 TWSE 限制請求頻率或網路不通，請稍等幾分鐘後再試一次。"
-            )
-        if unmatched_days > 0:
-            raise RuntimeError(
-                "TWSE 有回應資料，但每一天的資料裡都找不到你追蹤清單中的股票代號 -- "
-                "請確認 config.py 的 WATCHLIST／data/watchlist.json 裡的代號跟 TWSE 網站上的"
-                "代號完全一致（例如是否多了空白、大小寫，或代號本身在 T86 這份報表中沒有揭露）。"
-                "上面的 [warn] 訊息有列出 TWSE 當天實際回傳了哪些代號，可以比對看看。"
-            )
+    total_rows_saved = sum(len(_load_existing(s["code"])) for s in WATCHLIST)
+    if total_rows_saved == 0 and n_failed > 0:
         raise RuntimeError(
-            "沒有抓到任何三大法人資料，但也沒有偵測到請求失敗或代號不符 -- 這種情況不預期會發生，"
-            "請把這顆按鈕下方「執行紀錄」完整內容回報，方便進一步排查。"
+            "FinMind 完全沒有回應任何一檔股票的三大法人資料 -- 很可能是網路不通、"
+            "暫時超過免費額度限制（預設每小時 300 次，未設定 token 的情況下），"
+            "或 FinMind 服務本身異常，請稍等幾分鐘後再試一次。上面每一檔股票的 "
+            "[warn] 訊息會顯示 FinMind 實際回傳的錯誤內容。"
         )
 
 
@@ -308,7 +277,7 @@ if __name__ == "__main__":
     # but was later found wiped by a Streamlit Cloud container restart --
     # this is what actually protects that result, and it's also what
     # lets the deployed app pick it up automatically instead of ever
-    # needing to repeat the expensive backfill there.
+    # needing to repeat the backfill there.
     import market_data_sync
     import github_json_store
     try:

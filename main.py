@@ -18,12 +18,15 @@ existing, so run --prices at least once first. Run it explicitly
 (`python main.py --market-value`) until you've checked its output looks
 right, then fold it into your regular routine if it does.
 
---institutional is also opt-in, but for a different reason: its TWSE
-report (T86) returns every listed stock for ONE day per call, so a
-backfill costs roughly one request per trading day rather than one per
-ticker (see institutional_data.py's docstring) -- folding it into the
-default run would make every plain `python main.py` noticeably slower.
-Run it explicitly, or use the separate button in the app sidebar.
+--institutional is also opt-in, kept consistent with --market-value above
+even though the original reason for that (an expensive TWSE T86-based
+backfill costing ~1 request per trading day) no longer applies as of
+2026-09-13 -- institutional_data.py now fetches from FinMind instead,
+one request per WATCHLIST TICKER covering its whole date range, which
+for a typical watchlist is fast enough to no longer need special
+handling (see institutional_data.py's/finmind_client.py's docstrings for
+the full story). Run it explicitly, or use the separate button in the
+app sidebar, same as before.
 
 Speed: whenever more than one of prices/dividends/news is being fetched,
 they now run CONCURRENTLY (in separate threads) instead of one after
