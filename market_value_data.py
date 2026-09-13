@@ -40,9 +40,8 @@ Requires data/prices/<code>.csv to already exist (run price_data.py, or
 
 CAVEATS
 -------
-- No retroactive history: the very first time you run this, you get
-  exactly one data point (today's date). data/market_value/<code>.csv
-  only gets a row for dates on or after your first collected snapshot --
+- No retroactive history: data/market_value/<code>.csv only gets a row
+  for dates on or after your first collected shares snapshot --
   shares_as_of() forward-fills the most recent known share count onto
   each trading day, but has nothing to fill in with for dates before
   that first snapshot, so those earlier trading days are simply skipped
@@ -52,6 +51,25 @@ CAVEATS
   intraday/between report dates as authorized participants create/redeem
   units -- daily granularity is a reasonable approximation, not a precise
   intraday figure.
+
+BUGFIX (2026-09-13): the join used to iterate ONLY over price dates and
+look up the shares count as of each one (shares_as_of, forward-fill).
+That silently produced ZERO output rows whenever the shares snapshot's
+own report date (TWSE's "出表日期", or today for the yfinance snapshot
+fallback) was NEWER than every price date on file -- which is the
+common case, not a rare one: TWSE's fund dataset and its STOCK_DAY price
+report update on independent schedules, so `python main.py
+--market-value` (or the app's button) run back-to-back with a fresh
+price fetch can still see the fund report already stamped "today" while
+today's own closing price hasn't posted yet. The script would finish
+with no error and print "0 daily market-value row(s) saved", which is
+exactly why a completed fetch could still show "尚無市值資料"
+everywhere. Fixed by ALSO adding one target date per shares snapshot
+(not only per price date), using the latest AVAILABLE close on or
+before that date (predict_dividends.price_on_or_before) rather than
+requiring an exact same-day price row -- this guarantees at least one
+row as soon as you have any price history at all AND any shares
+reading, regardless of whether the two happen to be dated identically.
 """
 
 import csv
@@ -63,6 +81,7 @@ import yfinance as yf
 
 from config import WATCHLIST, DATA_DIR, REQUEST_DELAY_SECONDS
 from twse_client import get_json
+from predict_dividends import price_on_or_before
 
 TWSE_FUND_URL = "https://openapi.twse.com.tw/v1/opendata/t187ap47_L"
 SUFFIXES_TO_TRY = [".TW", ".TWO"]
@@ -229,15 +248,31 @@ def run():
             print()
             continue
 
+        # Union of price dates AND shares-snapshot dates (see the BUGFIX
+        # note in the module docstring) -- for a plain price date, close
+        # comes from that exact row (unchanged from before); for a
+        # shares-snapshot date that ISN'T also a price date yet (the
+        # common case: the shares report is newer than the latest posted
+        # close), close falls back to the most recent AVAILABLE close on
+        # or before it, so a row still gets written using the best price
+        # actually on hand instead of silently producing nothing.
+        price_by_date = dict(prices)
+        target_dates = sorted(set(price_by_date) | {d for d, _ in shares_history})
+
         out_path = os.path.join(DATA_DIR, "market_value", f"{code}.csv")
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         n_written = 0
         with open(out_path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.writer(f)
             writer.writerow(["Date", "Close", "SharesOutstanding", "MarketValue"])
-            for d, close in prices:
+            for d in target_dates:
                 shares = shares_as_of(shares_history, d)
                 if shares is None:
+                    continue
+                close = price_by_date.get(d)
+                if close is None:
+                    close = price_on_or_before(prices, d)
+                if close is None:
                     continue
                 writer.writerow([d.isoformat(), close, shares, round(close * shares, 2)])
                 n_written += 1
