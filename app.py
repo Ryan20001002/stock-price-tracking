@@ -77,6 +77,7 @@ import dividend_data
 import news_data
 import market_value_data
 import predict_dividends
+import returns
 import ddm_valuation
 import user_store
 import institutional_data
@@ -972,10 +973,53 @@ with tab_prices:
                     use_container_width=True, hide_index=True,
                 )
 
-            # --- 三大法人買賣超, directly below the price chart -- shares the
-            # same ticker (picked) and date range (start_date/end_date) as
-            # the price section above, so there's one selector/range picker
-            # for both instead of a second, separate one.
+            # --- 累積報酬率：含股利 vs. 不含股利 (returns.py, 2026-09-13) --
+            # Shares the same ticker (picked) and date range as the price
+            # section above. Note this reads a SPLIT-ADJUSTED price series
+            # via returns.load_prices() (same as predict_dividends.py/
+            # ddm_valuation.py use), which is NOT the same series as the
+            # raw `prices` DataFrame the candlestick chart above renders --
+            # comparing a value here to the raw price table above will not
+            # match on a ticker that's ever split (see splits.py).
+            st.divider()
+            st.subheader("累積報酬率（含股利 vs. 不含股利）")
+            st.caption(
+                "藍線＝總報酬（含股利，每次除息假設當天以收盤價再投入買回）；"
+                "灰線＝價格報酬（不含股利，只看股價漲跌）。兩線的差距，就是"
+                "只看股價漲跌會漏掉的股利貢獻。已做過還原股價處理，避免拆分"
+                "事件（例如 0050 於 2025-06-18 的 1 股換 4 股）把報酬率算錯。"
+            )
+            adj_prices = [(d, c) for d, c in returns.load_prices(picked) if start_date <= d <= end_date]
+            if len(adj_prices) < 2:
+                st.info("這個區間內的股價資料不足以計算報酬率，請試試其他區間。")
+            else:
+                divs_in_range = [
+                    (d, a) for d, a in returns.dividends_by_code().get(picked, [])
+                    if start_date <= d <= end_date
+                ]
+                price_series = returns.price_return_series(picked, prices=adj_prices)
+                total_series = returns.total_return_series(picked, prices=adj_prices, dividends=divs_in_range)
+
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=[d for d, _ in total_series], y=[v - 1 for _, v in total_series],
+                    name="總報酬（含股利）", mode="lines", line=dict(color="#4c78a8"),
+                ))
+                fig.add_trace(go.Scatter(
+                    x=[d for d, _ in price_series], y=[v - 1 for _, v in price_series],
+                    name="價格報酬（不含股利）", mode="lines", line=dict(color="#9e9e9e"),
+                ))
+                fig.update_layout(yaxis_tickformat="+.1%", legend=dict(orientation="h", y=1.1), **_FIXED_AXES)
+                st.plotly_chart(fig, use_container_width=True, config=_MOBILE_CHART_CONFIG)
+
+                col_total, col_price = st.columns(2)
+                col_total.metric("含股利總報酬（區間累積）", f"{(total_series[-1][1] - 1):+.2%}")
+                col_price.metric("不含股利價格報酬（區間累積）", f"{(price_series[-1][1] - 1):+.2%}")
+
+            # --- 三大法人買賣超, directly below -- shares the same ticker
+            # (picked) and date range (start_date/end_date) as the price
+            # section above, so there's one selector/range picker for both
+            # instead of a second, separate one.
             st.divider()
             st.subheader("三大法人買賣超")
             inst = load_csv(os.path.join(config.DATA_DIR, "institutional", f"{picked}.csv"))
