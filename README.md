@@ -29,7 +29,8 @@ data/                    All fetched/computed output (gitignored -- regenerate b
                          scripts above, don't expect this folder in a fresh git clone)
   prices/<code>.csv          Daily OHLC per ticker
   dividends/dividends.csv   Combined dividend history for the whole watchlist
-  dividends/*.csv            Prediction/valuation outputs (dividend_prediction.csv, ddm_valuation.csv)
+  dividends/*.csv            Prediction/valuation outputs (dividend_prediction.csv,
+                             dividend_prediction_slots.csv, ddm_valuation.csv)
   news/news.csv               Combined headlines for the whole watchlist
   shares/<code>.csv          Accumulated shares-outstanding snapshots per ticker
   market_value/<code>.csv   Daily market value per ticker (price x shares outstanding)
@@ -464,8 +465,18 @@ that same window:
   (arithmetic, not geometric -- yield is a level, not a compounding step)
   mean, and predicts next payment = latest share price × mean yield.
 
-Output (both methods' columns) is saved to
-`data/dividends/dividend_prediction.csv`.
+Output is saved to two files: `data/dividends/dividend_prediction.csv`
+(one row per ticker -- both methods' summary figures, including the
+prediction for whichever payment slot comes up next) and, new
+2026-09-14 alongside the app's dashboard redesign,
+`data/dividends/dividend_prediction_slots.csv` (one row per ticker
+**per payment month** -- e.g. 0050 gets a January row AND a July row,
+each with its own last-payment amount, same-month growth rate, and
+predicted next amount for that slot). The single-row file only ever
+shows the soonest-upcoming slot; the per-slot file is what lets you see
+every payday's own prediction at once, which is what the dashboard's
+"逐月預測" (month-by-month) table under each ticker in the 股利 tab
+renders.
 
 **Split-adjusted.** 0050 did a 1-for-4 split on 2025-06-18 (confirmed
 both in TWSE's own price history and in public news coverage).

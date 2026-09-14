@@ -194,6 +194,10 @@ from splits import fetch_splits, adjust_series, detect_unexplained_jumps
 
 DIVIDENDS_CSV = os.path.join(DATA_DIR, "dividends", "dividends.csv")
 OUTPUT_CSV = os.path.join(DATA_DIR, "dividends", "dividend_prediction.csv")
+# Per-payment-slot breakdown (one row per ticker per payday), added
+# 2026-09-14 alongside the app.py UI redesign -- see the comment at its
+# only writer, in run(), for why this exists as a separate file.
+OUTPUT_SLOTS_CSV = os.path.join(DATA_DIR, "dividends", "dividend_prediction_slots.csv")
 
 WINDOW_DAYS = 365
 
@@ -533,6 +537,7 @@ def run():
     rows_by_code, meta = load_dividends()
 
     summary_rows = []
+    slot_rows = []
     print(f"{'Ticker':<8}{'Name':<10}{'Method A: growth-rate':<28}{'Method B: yield-based'}")
     print("-" * 90)
 
@@ -590,6 +595,14 @@ def run():
             "method_a_predicted_next_payment": round(result_a["predicted_next_payment"], 4) if result_a else "",
             "method_a_predicted_next_payment_month": result_a["predicted_next_payment_month"] if result_a else "",
             "method_a_predicted_next_payment_basis": result_a["predicted_next_payment_basis"] if result_a else "",
+            # (2026-09-14, UI-readability follow-up) the SLOT's own growth
+            # rate/sample size weren't previously saved to the CSV -- only
+            # the whole-year rate was -- so the app had no way to show the
+            # actual number that produced predicted_next_payment. Added so
+            # the dashboard card can explain itself instead of just
+            # printing a bare figure.
+            "method_a_predicted_next_payment_growth_rate": round(result_a["predicted_next_payment_growth_rate"], 6) if result_a else "",
+            "method_a_predicted_next_payment_n_years_used": result_a["predicted_next_payment_n_years_used"] if result_a else "",
             "method_a_predicted_next_1yr_total": round(result_a["predicted_next_1yr_total"], 4) if result_a else "",
             "method_a_n_slots_predicted": result_a["n_slots_predicted"] if result_a else "",
             "method_a_n_slots_total": result_a["n_slots_total"] if result_a else "",
@@ -599,11 +612,36 @@ def run():
             "method_b_predicted_next_payment": round(result_b["predicted_next_payment"], 4) if result_b else "",
         })
 
+        # (2026-09-14, UI-readability follow-up) predict_next_payment()
+        # already computes a prediction for EVERY payment slot in the
+        # fund's current cycle (slot_predictions), not just the soonest
+        # upcoming one -- previously that only reached the console printout
+        # above, never a file, so the app couldn't show "what does this
+        # fund pay in each of its paydays this year," which is the more
+        # directly useful view for a fund like 0050/006208 that pays twice
+        # a year. One row per (ticker, payment month).
+        if result_a:
+            for m in sorted(result_a["slot_predictions"]):
+                slot = result_a["slot_predictions"][m]
+                slot_rows.append({
+                    "code": code,
+                    "name": meta[code]["name"],
+                    "month": m,
+                    "last_amount": round(slot["last_amount"], 4),
+                    "last_date": slot["last_date"].isoformat(),
+                    "growth_rate": round(slot["growth_rate"], 6),
+                    "n_years_used": slot["n_years_used"],
+                    "basis": slot["basis"],
+                    "predicted_amount": round(slot["predicted_amount"], 4),
+                })
+
     os.makedirs(os.path.dirname(OUTPUT_CSV), exist_ok=True)
     fieldnames = ["code", "name", "name_en", "window_start", "window_end",
                   "method_a_n_payments", "method_a_growth_window_years", "method_a_annual_growth_rate",
                   "method_a_predicted_next_payment", "method_a_predicted_next_payment_month",
-                  "method_a_predicted_next_payment_basis", "method_a_predicted_next_1yr_total",
+                  "method_a_predicted_next_payment_basis",
+                  "method_a_predicted_next_payment_growth_rate", "method_a_predicted_next_payment_n_years_used",
+                  "method_a_predicted_next_1yr_total",
                   "method_a_n_slots_predicted", "method_a_n_slots_total",
                   "method_b_n_payments", "method_b_mean_yield", "method_b_latest_price",
                   "method_b_predicted_next_payment"]
@@ -612,6 +650,14 @@ def run():
         writer.writeheader()
         writer.writerows(summary_rows)
     print(f"Saved {OUTPUT_CSV}")
+
+    slot_fieldnames = ["code", "name", "month", "last_amount", "last_date",
+                        "growth_rate", "n_years_used", "basis", "predicted_amount"]
+    with open(OUTPUT_SLOTS_CSV, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=slot_fieldnames)
+        writer.writeheader()
+        writer.writerows(slot_rows)
+    print(f"Saved {OUTPUT_SLOTS_CSV}")
 
 
 if __name__ == "__main__":

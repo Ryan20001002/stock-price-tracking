@@ -306,6 +306,8 @@ DIVIDEND_PREDICTION_COLUMNS_ZH = {
     "method_a_predicted_next_payment": "方法A_預測下次配息",
     "method_a_predicted_next_payment_month": "方法A_預測配息月份",
     "method_a_predicted_next_payment_basis": "方法A_預測依據",
+    "method_a_predicted_next_payment_growth_rate": "方法A_該月份年增率",
+    "method_a_predicted_next_payment_n_years_used": "方法A_該月份採用年數",
     "method_a_predicted_next_1yr_total": "方法A_預測未來1年總配息",
     "method_a_n_slots_predicted": "方法A_已預測配息月份數",
     "method_a_n_slots_total": "方法A_配息月份總數",
@@ -313,6 +315,25 @@ DIVIDEND_PREDICTION_COLUMNS_ZH = {
     "method_b_mean_yield": "方法B_平均殖利率",
     "method_b_latest_price": "方法B_最新股價",
     "method_b_predicted_next_payment": "方法B_預測下次配息",
+}
+
+# Per-payment-slot breakdown table (dividend_prediction_slots.csv) -- see
+# predict_dividends.py's run() for why this is a separate file (one row
+# per ticker per payday, not just the single soonest-upcoming one).
+DIVIDEND_PREDICTION_SLOTS_COLUMNS_ZH = {
+    "month": "配息月份", "last_amount": "上次配息金額", "last_date": "上次配息日期",
+    "growth_rate": "同月份年增率", "n_years_used": "採用年數",
+    "basis": "預測依據", "predicted_amount": "預測配息金額",
+}
+DIVIDEND_PREDICTION_SLOTS_COLUMN_ORDER = [
+    "month", "last_date", "last_amount", "growth_rate", "n_years_used", "basis", "predicted_amount",
+]
+
+# "basis" comes straight from predict_dividends.py's internal tag names
+# (same_month / fallback_whole_year) -- translated here for display only.
+PREDICTION_BASIS_ZH = {
+    "same_month": "同月份歷史資料",
+    "fallback_whole_year": "同月份資料不足，改用整年年增率",
 }
 
 MARKET_VALUE_COLUMNS_ZH = {
@@ -1061,6 +1082,7 @@ with tab_dividends:
     else:
         divs = load_csv(os.path.join(config.DATA_DIR, "dividends", "dividends.csv"))
         pred = load_csv(os.path.join(config.DATA_DIR, "dividends", "dividend_prediction.csv"))
+        pred_slots = load_csv(os.path.join(config.DATA_DIR, "dividends", "dividend_prediction_slots.csv"))
 
         if divs is None and pred is None:
             st.info("尚無股利資料 -- 請在側邊欄點擊「抓取股利」。")
@@ -1087,18 +1109,91 @@ with tab_dividends:
                         use_container_width=True, hide_index=True,
                     )
 
-                st.caption("下次配息預測（兩種方法，近1年資料）")
+                st.caption("下次配息預測（兩種方法）")
                 ticker_pred = pred[pred["code"] == code] if pred is not None else None
                 if ticker_pred is None or ticker_pred.empty:
                     st.caption("尚無預測結果 -- 請在側邊欄點擊「重新計算股利預測」（需要先有股利與股價資料）。")
                 else:
-                    st.dataframe(
-                        display_table(
-                            ticker_pred.drop(columns=["code", "name", "name_en"], errors="ignore"),
-                            labels=DIVIDEND_PREDICTION_COLUMNS_ZH,
-                        ),
-                        use_container_width=True, hide_index=True,
-                    )
+                    p = ticker_pred.iloc[0]
+
+                    col_a, col_b = st.columns(2)
+                    with col_a:
+                        if pd.notna(p.get("method_a_predicted_next_payment")):
+                            month_val = p.get("method_a_predicted_next_payment_month")
+                            month_label = f"{int(month_val)}月" if pd.notna(month_val) else "?"
+                            basis_tag = p.get("method_a_predicted_next_payment_basis")
+                            basis_zh = PREDICTION_BASIS_ZH.get(basis_tag, basis_tag or "")
+                            years_used = p.get("method_a_predicted_next_payment_n_years_used")
+                            years_label = (
+                                f"（採用 {int(years_used)} 年同月份資料）"
+                                if basis_tag == "same_month" and pd.notna(years_used) else ""
+                            )
+                            growth = p.get("method_a_predicted_next_payment_growth_rate")
+                            st.metric(
+                                f"方法A：預測 {month_label} 配息",
+                                f"{p['method_a_predicted_next_payment']:.4f}",
+                                delta=f"{growth*100:+.1f}%" if pd.notna(growth) else None,
+                                help=f"依據：{basis_zh}{years_label}",
+                            )
+                        else:
+                            st.caption("方法A：資料不足，無法預測。")
+                    with col_b:
+                        if pd.notna(p.get("method_b_predicted_next_payment")):
+                            mean_yield = p.get("method_b_mean_yield")
+                            latest_price = p.get("method_b_latest_price")
+                            st.metric(
+                                "方法B：殖利率估算",
+                                f"{p['method_b_predicted_next_payment']:.4f}",
+                                delta=f"殖利率 {mean_yield*100:.3f}%" if pd.notna(mean_yield) else None,
+                                help=f"最新股價：{latest_price:.2f}" if pd.notna(latest_price) else None,
+                            )
+                        else:
+                            st.caption("方法B：無股價資料，無法預測。")
+
+                    ticker_slots = pred_slots[pred_slots["code"] == code] if pred_slots is not None else None
+                    if ticker_slots is not None and not ticker_slots.empty:
+                        n_total = p.get("method_a_n_slots_total")
+                        yr_total = p.get("method_a_predicted_next_1yr_total")
+                        n_total_label = f"{int(n_total)}" if pd.notna(n_total) else "?"
+                        yr_total_label = f"{yr_total:.4f}" if pd.notna(yr_total) else "?"
+                        st.caption(
+                            f"這檔股票目前固定在 {n_total_label} 個月份配息 -- 方法A 逐月預測如下，"
+                            f"加總後預測未來1年總配息約為 **{yr_total_label}**："
+                        )
+                        display_slots = ticker_slots.assign(
+                            growth_rate=(ticker_slots["growth_rate"] * 100).map(lambda x: f"{x:+.1f}%"),
+                            basis=ticker_slots["basis"].map(PREDICTION_BASIS_ZH).fillna(ticker_slots["basis"]),
+                        )
+                        st.dataframe(
+                            display_table(
+                                display_slots.drop(columns=["code", "name"], errors="ignore").sort_values("month"),
+                                column_order=DIVIDEND_PREDICTION_SLOTS_COLUMN_ORDER,
+                                labels=DIVIDEND_PREDICTION_SLOTS_COLUMNS_ZH,
+                            ),
+                            use_container_width=True, hide_index=True,
+                        )
+
+                    with st.expander("方法A 整年年增率是怎麼算出來的？（詳細數據）"):
+                        growth_rate = p.get("method_a_annual_growth_rate")
+                        yrs = p.get("method_a_growth_window_years")
+                        n_pay = p.get("method_a_n_payments")
+                        if pd.notna(growth_rate) and pd.notna(yrs) and pd.notna(n_pay):
+                            st.write(
+                                f"近 {int(yrs)} 年配息總額（共 {int(n_pay)} 次配息）與前 {int(yrs)} 年配息總額"
+                                f"相比，換算成年化增率為 **{growth_rate*100:+.1f}%**。這是整體配息趨勢的"
+                                f"參考值，不是上面卡片直接用的數字 -- 卡片用的是「該配息月份」自己過去幾年"
+                                f"的年增率，只有同月份資料不足時才會退回用這個整年增率（見上面「依據」）。"
+                            )
+                        else:
+                            st.write("歷史配息資料不足（需要至少約 4 年），無法計算整年年增率。")
+                        st.caption("原始統計欄位（供進階檢視／除錯用）")
+                        st.dataframe(
+                            display_table(
+                                ticker_pred.drop(columns=["code", "name", "name_en"], errors="ignore"),
+                                labels=DIVIDEND_PREDICTION_COLUMNS_ZH,
+                            ),
+                            use_container_width=True, hide_index=True,
+                        )
 
                 if i < len(my_watchlist) - 1:
                     st.divider()
@@ -1109,9 +1204,10 @@ with tab_dividends:
                 "配息屬於哪個月份」找出同月份過去最多5年的配息紀錄，用同月份的年增率去"
                 "推算下一次配息金額（同月份資料不足3年時才退回用整年年增率）－－這樣才"
                 "不會用金額較小的那次配息去推算金額較大的下一次配息（反之亦然）。方法B："
-                "以平均殖利率 × 最新股價估算。兩者假設不同，結果經常不一致 -- 詳細原因與"
-                "所有注意事項請見 README 的 'Predicting the next dividend' 章節，使用前"
-                "請勿只憑其中一個數字下定論。"
+                "以平均殖利率 × 最新股價估算。兩者假設不同，結果經常不一致 -- 上面每檔股票"
+                "的「逐月預測」表格會列出全年每個配息月份各自的預測，「詳細數據」則可以展開"
+                "看整年年增率的完整計算過程 -- 詳細原因與所有注意事項請見 README 的 "
+                "'Predicting the next dividend' 章節，使用前請勿只憑其中一個數字下定論。"
             )
 
 # --- Market value -------------------------------------------------------------------
