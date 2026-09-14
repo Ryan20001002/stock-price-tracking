@@ -301,9 +301,13 @@ DIVIDEND_PREDICTION_COLUMNS_ZH = {
     "code": "代號", "name": "中文名稱", "name_en": "英文名稱",
     "window_start": "統計起始日", "window_end": "統計結束日",
     "method_a_n_payments": "方法A_配息次數",
-    "method_a_annual_growth_rate": "方法A_年增率",
+    "method_a_annual_growth_rate": "方法A_整年年增率",
     "method_a_predicted_next_payment": "方法A_預測下次配息",
+    "method_a_predicted_next_payment_month": "方法A_預測配息月份",
+    "method_a_predicted_next_payment_basis": "方法A_預測依據",
     "method_a_predicted_next_1yr_total": "方法A_預測未來1年總配息",
+    "method_a_n_slots_predicted": "方法A_已預測配息月份數",
+    "method_a_n_slots_total": "方法A_配息月份總數",
     "method_b_n_payments": "方法B_配息次數",
     "method_b_mean_yield": "方法B_平均殖利率",
     "method_b_latest_price": "方法B_最新股價",
@@ -1099,9 +1103,13 @@ with tab_dividends:
                     st.divider()
 
             st.caption(
-                "方法A：以幾何平均成長率推算下一次配息金額。方法B：以平均殖利率 × 最新股價"
-                "估算。兩者假設不同，結果經常不一致 -- 詳細原因與所有注意事項請見 README 的 "
-                "'Predicting the next dividend' 章節，使用前請勿只憑其中一個數字下定論。"
+                "方法A：先算出「整年年增率」（近1年配息總額 vs. 前1年配息總額，避免配息"
+                "季節性被誤判為成長/衰退），再依「下一次配息屬於哪個月份」找出同月份過去"
+                "最多5年的配息紀錄，用同月份的年增率去推算下一次配息金額（同月份資料不足時"
+                "才退回用整年年增率）－－這樣才不會用金額較小的那次配息去推算金額較大的"
+                "下一次配息（反之亦然）。方法B：以平均殖利率 × 最新股價估算。兩者假設不同，"
+                "結果經常不一致 -- 詳細原因與所有注意事項請見 README 的 'Predicting the next "
+                "dividend' 章節，使用前請勿只憑其中一個數字下定論。"
             )
 
 # --- Market value -------------------------------------------------------------------

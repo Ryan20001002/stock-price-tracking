@@ -411,23 +411,44 @@ around by years-old performance. It then computes two predictions from
 that same window:
 
 - **Method A -- growth rate**: assumes the dividend *amount* grows at a
-  constant annual rate. **(Frequency fix, 2026-09-14)** The rate is
-  computed by comparing the trailing-12-month **total** of payments to
-  the 12-month total immediately before that -- a rolling year-over-year
-  comparison, not a payment-to-payment ratio. This matters because a
-  fund's payments aren't evenly sized across the year: 0050 and 006208,
-  for instance, consistently pay more in January than July every year.
-  Comparing consecutive payments (the old approach) mistook that normal
-  seasonal split for "growth" or "decline" depending on which half of the
-  year you looked at; comparing full trailing years to each other cancels
-  the seasonal pattern out and isolates real year-over-year change,
-  regardless of whether a fund pays annually, semi-annually, or
-  quarterly. The resulting annual growth rate is then applied directly to
-  the most recent payment to predict the next one: next payment = most
-  recent payment × (1 + annual growth rate). Needs roughly 2 years of
-  payment history to compute (a full trailing year plus a full prior year
-  to compare it to); with less than that, Method A reports "insufficient
-  data."
+  constant annual rate, computed two ways that work together:
+  - **The whole-year annual growth rate** (frequency fix, 2026-09-14):
+    the trailing-12-month **total** of payments compared to the 12-month
+    total immediately before that -- a rolling year-over-year comparison,
+    not a payment-to-payment ratio. This matters because a fund's
+    payments aren't evenly sized across the year: 0050 and 006208, for
+    instance, consistently pay more in one payday than the other.
+    Comparing consecutive payments (the original approach) mistook that
+    normal seasonal split for "growth" or "decline" depending on which
+    half of the year you looked at; comparing full trailing years to each
+    other cancels the seasonal pattern out and isolates real
+    year-over-year change, regardless of whether a fund pays annually,
+    semi-annually, or quarterly. Reported for transparency as a read on
+    the fund's overall payout trend, and used as a fallback (see next
+    point).
+  - **The actual next-payment prediction** (same-month fix, 2026-09-14):
+    applying the whole-year rate straight to "whichever payment was most
+    recent" turned out to have its own problem for a fund that pays
+    unevenly -- e.g. 0050 pays more in January than July every year, so
+    predicting right after a July payment by growing July's (smaller)
+    amount produces a number sized for the wrong payday, since the
+    *actual* next payment is the following (larger) January. Fixed by
+    predicting each payment from its own calendar-month's history
+    instead: the upcoming payment's month is identified from the fund's
+    current payment cycle (read off the trailing 1 year, so old one-off
+    payments in stale months from years back can't hijack this -- see
+    below), that month's own payments over up to the last 5 years are
+    pulled, and a growth rate is computed as the **geometric mean** of
+    the year-over-year ratios between consecutive same-month payments --
+    applied to that slot's own most recent payment. A slot with fewer
+    than 2 same-month payments on file (new ETFs) falls back to the
+    whole-year rate instead, applied to that slot's own last payment.
+    `predicted_next_1yr_total` is rebuilt the same way, bottom-up: every
+    slot in the current cycle gets its own prediction and they're summed.
+  Needs roughly 2 years of payment history for the whole-year rate (a
+  full trailing year plus a full prior year to compare it to); with less
+  than that, there's nothing to fall back on either, and Method A reports
+  "insufficient data."
 - **Method B -- yield**: assumes the dividend *yield* (dividend ÷ share
   price) holds roughly steady, which can fit an ETF better since payout
   scales with the fund's price/NAV level rather than its own growth
@@ -463,55 +484,60 @@ splitting, say -- there's been speculation about this, unconfirmed) gets
 flagged instead of silently corrupting results. If that warning ever
 fires, verify it and add the real event to `KNOWN_SPLITS`.
 
-**Latest run** (against the data pulled above, using the frequency-fixed
+**Latest run** (against the data pulled above, using the same-month-fixed
 Method A):
 
-| Ticker | Trailing 1yr total | Prior 1yr total | Method A: annual growth | Method A prediction | Method B: mean yield | Method B prediction |
+| Ticker | Whole-year growth | Next payment slot | Same-month growth (that slot) | Method A prediction | Method B: mean yield | Method B prediction |
 |---|---|---|---|---|---|---|
-| 0050 (元大台灣50) | 1.6000 (2026-01-22: 1.00, 2026-07-21: 0.60) | 0.5288 (split-adjusted) | +202.6% | 1.8156 | 0.989% (price 109.90) | **1.0870** |
-| 006208 (富邦台50) | 8.1980 (2025-11-18: 3.448, 2026-07-16: 4.75) | 1.8890 | +334.0% | 20.6143 | 2.226% (price 251.65) | **5.6027** |
-| 00878 (國泰永續高股息) | 2.4900 (0.40, 0.42, 0.66, 1.01) | 1.9200 | +29.7% | 1.3098 | 2.325% (price 34.39) | **0.7994** |
+| 0050 (元大台灣50) | +202.6% | January (5yr same-month history) | +49.5% | **1.4953** | 0.989% (price 109.90) | **1.0870** |
+| 006208 (富邦台50) | +334.0% | November (5yr same-month history) | +20.4% | **4.1513** | 2.226% (price 251.65) | **5.6027** |
+| 00878 (國泰永續高股息) | +29.7% | November (5yr same-month history) | +9.3% | **0.4373** | 2.325% (price 34.39) | **0.7994** |
 
-The two methods disagree quite a bit, and this run also shows two real
-caveats with the fixed Method A worth understanding rather than taking
-the numbers at face value:
+Notice the whole-year growth rate and the actual prediction can diverge
+sharply now (0050: +202.6% whole-year vs. +49.5% for the January slot
+specifically) -- that's the same-month fix doing its job: the whole-year
+number is still a fair read on the fund's aggregate payout trend, but the
+prediction itself comes from the specific slot's own history, not from
+scaling whichever payment happened to be most recent. This run also
+surfaced two real caveats worth understanding rather than taking the
+numbers at face value:
 
-- **0050 -- a split can distort the growth rate for about a year
-  afterwards.** 0050's *prior* trailing-year window (2025-01-17 and
-  2025-07-21) straddles its 2025-06-18 split: the January payment predates
-  the split and gets divided by 4 to stay in current-share terms, while
-  the July payment doesn't need adjusting. That drags the prior-year
-  total down to 0.5288, well below what it would be if both payments were
-  on the same side of the split -- which is why Method A's growth rate
-  here (+202.6%) is so much larger than 006208's or 00878's underlying
-  payout trend would suggest. This isn't a bug in the split-adjustment
-  math (it's doing exactly what it's supposed to: keeping everything in
-  current-share terms) -- it's an inherent limit of comparing trailing
-  years across a split boundary using only 2 years of history. It self-corrects
-  once a full year has passed with no comparison window touching the
-  split date; until then, treat 0050's Method A number with extra
-  skepticism.
-- **006208 -- Method A isn't outlier-robust.** Its trailing-year total
-  (8.198) is genuinely much larger than the prior year's (1.889) in the
-  raw data itself -- both payments roughly quadrupled year-over-year
-  (0.9 -> 3.448, 0.989 -> 4.75), not a seasonal or split artifact. Method
-  A takes that at face value and extrapolates a +334% annual growth rate
-  forward, which is a large bet on one unusually large pair of payments
-  continuing. Method B's yield-based prediction (5.6027) is far more
-  conservative because it anchors to price rather than compounding the
-  recent jump.
-- **00878** is the cleanest read here: 4 payments/year, no split, no
-  single outsized payment -- Method A's +29.7% and Method B's yield-based
-  prediction (0.7994) bracket a plausible range without either being
-  distorted by the artifacts above.
+- **0050's January history still partly straddles its 2025-06-18
+  split.** Of the 5 Januaries used (2022-2026), the 4 pre-split ones are
+  all divided by 4 to stay in current-share terms while 2026's isn't --
+  so the single ratio crossing that boundary (0.169 -> 1.00, roughly 6x)
+  dominates the geometric mean and inflates the +49.5% figure well above
+  what 0050's real post-split payout trend probably is. This fades out
+  naturally as more post-split Januaries accumulate (by January 2027
+  there'll be 2 post-split years in the window instead of 1); until then,
+  treat 0050's Method A prediction with extra skepticism -- Method B's
+  1.0870, which doesn't depend on multi-year history at all, is arguably
+  more trustworthy right now.
+- **006208's November slot is dominated by one big jump.** Its 5
+  Novembers are 1.641, 1.03, 0.861, 0.9, 3.448 -- the last one nearly
+  quadrupling the year before it drives most of the geometric mean's
+  +20.4%. That's a real reported payment, not a seasonal or split
+  artifact (unlike 0050, 006208 hasn't split), but a geometric mean over
+  just 4 year-over-year steps still isn't a large enough sample to be
+  robust to one outsized payment. Worth checking whether that jump
+  reflects a one-time special distribution or a genuine step-change in
+  payout policy before trusting the extrapolation.
+- **00878** is the cleanest read here: no split, and while its August
+  slot shows a similarly large jump (0.66 -> 1.01, +37.8%, see the
+  per-slot breakdown the script prints), the slot actually being
+  predicted -- November, +9.3% -- is comparatively steady. Method A
+  (0.4373) and Method B (0.7994) still disagree by roughly 2x even so,
+  which is itself the useful signal: even on the cleanest ticker here,
+  no single number should be taken as settled.
 
 Neither method is "more correct" in general -- they encode different
 assumptions about *why* a fund's distribution changes (chasing a target
 dollar amount vs. chasing a target yield), and this data doesn't settle
 which fits better yet. See `predict_dividends.py`'s docstring for the
-full caveat list (including the two above). Worth watching both against
-whatever the next real payment turns out to be. Treat both as transparent
-baselines, not investment advice.
+full caveat list (including the two above, plus how stale one-off
+payments from years ago are excluded from the current payment cycle).
+Worth watching both against whatever the next real payment turns out to
+be. Treat both as transparent baselines, not investment advice.
 
 ## DDM valuation: is the current price justified by future dividends?
 
