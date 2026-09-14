@@ -2,10 +2,12 @@
 Predict each ticker's next dividend payment two different ways:
 
   Method A -- growth rate: assumes the dividend *amount* grows at a
-  constant annual rate. Compares the trailing-12-month total payout to
-  the 12-month total before that (see FREQUENCY FIX below for why annual
-  TOTALS, not individual payments) and applies the resulting growth rate
-  to the most recent payment.
+  constant annual rate. Compares a trailing multi-year total payout to
+  the multi-year total before that (see FREQUENCY FIX below for why
+  TOTALS, not individual payments, and LONGER-WINDOW FIX for why
+  multi-year, not just 1 year) and applies the resulting annualized
+  growth rate to the relevant upcoming payment (see SAME-MONTH
+  PREDICTION FIX for how "relevant" is determined).
 
   Method B -- yield: assumes the dividend *yield* (dividend / share
   price) holds roughly steady, which can fit an ETF better since payout
@@ -98,6 +100,44 @@ FREQUENCY FIX are still computed and reported (they remain a correct,
 frequency-agnostic read on the fund's overall payout trend) -- they're
 just no longer what predicted_next_payment is derived from directly.
 
+LONGER-WINDOW FIX (2026-09-14, by explicit follow-up request: "I don't
+think one year of data is enough, extend it to at least 2 years")
+-----------------------------------------------------------------------
+Two more places still leaned on just 1 year of data per comparison, and
+both were widened:
+  1. The whole-year growth rate (FREQUENCY FIX above) originally compared
+     a trailing 1-year TOTAL to the 1-year total before it. That's still
+     only two data points, so one unusually large or small year could
+     swing the whole estimate (this is exactly what happened with
+     006208's real data in the README's worked example -- a single
+     payment nearly quadrupling year-over-year drove a large headline
+     growth number off just that one comparison). GROWTH_WINDOW_YEARS
+     (default 2) now controls how many years each side of the comparison
+     spans -- e.g. with the default, a trailing 2-year TOTAL is compared
+     to the 2-year total before that, smoothing over one unusual single
+     year on either side. The resulting period-over-period ratio is then
+     ANNUALIZED (nth root, n = GROWTH_WINDOW_YEARS) so `annual_growth_rate`
+     stays a true per-year rate no matter how many years the comparison
+     windows span -- this matters because it's applied directly to a
+     single payment to predict the next one (predicted = last x (1 +
+     annual_growth_rate)), which would be wrong if the rate weren't
+     annualized first. Needs roughly 2*GROWTH_WINDOW_YEARS years of
+     payment history now (a full trailing window plus a full prior
+     window to compare it to) -- more than before, but a more stable
+     estimate once it's available.
+  2. The same-month growth rate's (SAME-MONTH PREDICTION FIX above)
+     minimum sample size, SAME_MONTH_MIN_SAMPLES, was raised from 2 to 3
+     -- a slot now needs at least 3 years of that same month's payments
+     on file before its own same-month geometric-mean rate is trusted
+     over the whole-year fallback, for the same single-outlier-year
+     reason.
+Note the trailing-1-year window used to detect the fund's CURRENT
+payment cycle (which months count as slots -- see point 1 under
+SAME-MONTH PREDICTION FIX) was deliberately NOT widened: that window's
+whole job is excluding years-old one-off payments from being mistaken
+for a real payday, and widening it would let exactly that kind of stale
+payment back in.
+
 Usage:
     python predict_dividends.py
 Reads data/dividends/dividends.csv (from dividend_data.py) and
@@ -109,17 +149,20 @@ CAVEATS (read before trusting the output)
 ------------------------------------------
 - Very small samples: these ETFs pay 2-4 times/year, so Method B
   averages just 1-4 numbers over the trailing year, and Method A's
-  annual growth rate is a single ratio of two 12-month totals (not
-  averaged over many periods) -- a single unusual payment can still
-  swing either prediction a lot, just no longer via a seasonal-timing
-  artifact (see FREQUENCY FIX above).
+  annual growth rate is a single ratio of two GROWTH_WINDOW_YEARS-year
+  totals (not averaged over many periods) -- a single unusual payment
+  can still swing either prediction, just less easily than before the
+  LONGER-WINDOW FIX widened each comparison window from 1 year to
+  GROWTH_WINDOW_YEARS (default 2), and no longer via a seasonal-timing
+  artifact at all (see FREQUENCY FIX above).
 - Method A's same-month growth rate (see SAME-MONTH PREDICTION FIX) can
-  still be swung hard by a single unusual payment, since it's a
-  geometric mean over at most 5 data points, not a large sample -- and a
-  slot with fewer than 2 same-month payments on file falls back to the
-  whole-year growth rate instead, which assumes that slot's payment
-  grows at the same rate as the fund's overall payout (a real fund
-  doesn't necessarily raise every payment in a year by the same amount).
+  still be swung by a single unusual payment, since it's a geometric
+  mean over at most 5 data points, not a large sample -- and a slot with
+  fewer than SAME_MONTH_MIN_SAMPLES (default 3) same-month payments on
+  file falls back to the whole-year growth rate instead, which assumes
+  that slot's payment grows at the same rate as the fund's overall
+  payout (a real fund doesn't necessarily raise every payment in a year
+  by the same amount).
 - Which months COUNT as payment slots is read off the trailing 1-year
   window only (not the ticker's whole history -- see
   _distinct_payment_months()'s docstring), specifically so old one-off or
@@ -230,51 +273,67 @@ def last_year_window(payments):
     return window_start, latest_date, windowed
 
 
-def method_a_growth_rate(all_payments, window_start, window_end):
-    """Frequency-agnostic annual growth rate (see FREQUENCY FIX in the
-    module docstring for why): compares the CURRENT trailing-12-month
-    total (window_start, window_end], as already computed by
-    last_year_window()) to the trailing-12-month total immediately
-    before it -- the same rolling window shifted back one year. Applies
-    that single growth rate to the most recent payment to predict the
-    next one.
+GROWTH_WINDOW_YEARS = 2  # min years per comparison window, per explicit follow-up request (2026-09-14: "I don't think one year is enough")
+GROWTH_WINDOW_DAYS = WINDOW_DAYS * GROWTH_WINDOW_YEARS
+
+
+def method_a_growth_rate(all_payments, window_end):
+    """Frequency-agnostic annual growth rate (see FREQUENCY FIX and
+    LONGER-WINDOW FIX in the module docstring for why): compares a
+    trailing GROWTH_WINDOW_YEARS-year TOTAL (ending at window_end) to the
+    GROWTH_WINDOW_YEARS-year total immediately before it -- the same
+    rolling window shifted back GROWTH_WINDOW_YEARS years -- then
+    ANNUALIZES the resulting ratio (nth root, n = GROWTH_WINDOW_YEARS) so
+    the returned rate is a true per-year rate no matter how many years
+    each window spans. Applies that rate to the most recent payment to
+    predict the next one (used directly by callers that don't need the
+    SAME-MONTH PREDICTION FIX's per-slot precision, and as the fallback
+    growth rate for thin slots inside predict_next_payment()).
 
     all_payments: this ticker's FULL payment history (any order) -- not
-    just the trailing-1yr window, since the "prior year" comparison
-    period falls entirely outside it.
+    just a single trailing window, since the "prior window" comparison
+    period falls entirely outside the current one.
+    window_end: the latest payment date on file -- the anchor both
+    comparison windows are measured back from.
 
-    Returns a dict, or None if the prior 12-month period has no (or
-    zero-total) payments -- i.e. there isn't a full second year of
-    history to compare against yet."""
-    current_window = sorted((d, amt) for d, amt in all_payments if window_start < d <= window_end)
+    Returns a dict, or None if the prior GROWTH_WINDOW_YEARS-year period
+    has no (or zero-total) payments -- i.e. there isn't a full second
+    window of history to compare against yet (roughly 2*GROWTH_WINDOW_YEARS
+    years needed in total)."""
+    current_window_start = window_end - timedelta(days=GROWTH_WINDOW_DAYS)
+    current_window = sorted((d, amt) for d, amt in all_payments if current_window_start < d <= window_end)
     current_total = sum(amt for _, amt in current_window)
     if not current_window or current_total <= 0:
         return None
 
-    prior_window_start = window_start - timedelta(days=WINDOW_DAYS)
-    prior_window = [(d, amt) for d, amt in all_payments if prior_window_start < d <= window_start]
+    prior_window_start = current_window_start - timedelta(days=GROWTH_WINDOW_DAYS)
+    prior_window = [(d, amt) for d, amt in all_payments if prior_window_start < d <= current_window_start]
     prior_total = sum(amt for _, amt in prior_window)
     if prior_total <= 0:
-        return None  # no full prior year of payments to compare against yet
+        return None  # no full prior window of payments to compare against yet
 
-    growth = current_total / prior_total - 1
+    period_growth = current_total / prior_total  # raw growth over the whole GROWTH_WINDOW_YEARS-year period
+    annual_growth = period_growth ** (1.0 / GROWTH_WINDOW_YEARS) - 1  # annualized, so it's usable per-payment
+
     last_amount = current_window[-1][1]
-    predicted_next = last_amount * (1 + growth)
+    predicted_next = last_amount * (1 + annual_growth)
+    avg_annual_total = current_total / GROWTH_WINDOW_YEARS
 
     return {
         "n_payments": len(current_window),
-        "n_payments_prior_year": len(prior_window),
-        "annual_growth_rate": growth,
+        "n_payments_prior_window": len(prior_window),
+        "growth_window_years": GROWTH_WINDOW_YEARS,
+        "annual_growth_rate": annual_growth,
         "last_payment_amount": last_amount,
         "predicted_next_payment": predicted_next,
-        "trailing_1yr_total": current_total,
-        "prior_1yr_total": prior_total,
-        "predicted_next_1yr_total": current_total * (1 + growth),
+        "trailing_window_total": current_total,
+        "prior_window_total": prior_total,
+        "predicted_next_1yr_total": avg_annual_total * (1 + annual_growth),
     }
 
 
 SAME_MONTH_MAX_YEARS = 5   # use at most this many years of same-month history
-SAME_MONTH_MIN_SAMPLES = 2  # need at least this many same-month payments for a YoY growth rate
+SAME_MONTH_MIN_SAMPLES = 3  # need at least this many same-month payments for a YoY growth rate (raised from 2, per the same "extend to 2+ years" follow-up request -- more years makes the geometric mean less swayed by one outlier year)
 
 
 def _distinct_payment_months(payments):
@@ -385,7 +444,7 @@ def predict_next_payment(all_payments, window_start, window_end):
     Returns a dict, or None if there isn't enough history to predict even
     the single next payment (no same-month history for that slot AND no
     whole-year growth rate to fall back on)."""
-    whole_year = method_a_growth_rate(all_payments, window_start, window_end)
+    whole_year = method_a_growth_rate(all_payments, window_end)
     fallback_growth = whole_year["annual_growth_rate"] if whole_year else None
 
     # The payment CYCLE (which months are currently "slots") is read off
@@ -421,9 +480,10 @@ def predict_next_payment(all_payments, window_start, window_end):
     return {
         "annual_growth_rate": whole_year["annual_growth_rate"] if whole_year else None,
         "n_payments": whole_year["n_payments"] if whole_year else None,
-        "n_payments_prior_year": whole_year["n_payments_prior_year"] if whole_year else None,
-        "trailing_1yr_total": whole_year["trailing_1yr_total"] if whole_year else None,
-        "prior_1yr_total": whole_year["prior_1yr_total"] if whole_year else None,
+        "n_payments_prior_window": whole_year["n_payments_prior_window"] if whole_year else None,
+        "trailing_window_total": whole_year["trailing_window_total"] if whole_year else None,
+        "prior_window_total": whole_year["prior_window_total"] if whole_year else None,
+        "growth_window_years": whole_year["growth_window_years"] if whole_year else None,
         "predicted_next_payment": next_slot["predicted_amount"],
         "predicted_next_payment_month": next_month,
         "predicted_next_payment_growth_rate": next_slot["growth_rate"],
@@ -496,9 +556,10 @@ def run():
 
         if result_a:
             if result_a["annual_growth_rate"] is not None:
-                print(f"    [A] trailing 1yr total: {result_a['trailing_1yr_total']:.4f}  vs.  "
-                      f"prior 1yr total: {result_a['prior_1yr_total']:.4f} ({result_a['n_payments_prior_year']} payment(s))  "
-                      f"->  whole-year annual growth rate: {result_a['annual_growth_rate']*100:+.1f}%")
+                yrs = result_a["growth_window_years"]
+                print(f"    [A] trailing {yrs}yr total: {result_a['trailing_window_total']:.4f}  vs.  "
+                      f"prior {yrs}yr total: {result_a['prior_window_total']:.4f} ({result_a['n_payments_prior_window']} payment(s))  "
+                      f"->  annualized whole-{yrs}yr growth rate: {result_a['annual_growth_rate']*100:+.1f}%")
             print(f"    [A] next payment predicted for month {result_a['predicted_next_payment_month']}, "
                   f"basis={result_a['predicted_next_payment_basis']} "
                   f"({result_a['predicted_next_payment_n_years_used']} same-month year(s) used): "
@@ -524,6 +585,7 @@ def run():
             "window_start": window_start.isoformat(),
             "window_end": window_end.isoformat(),
             "method_a_n_payments": result_a["n_payments"] if result_a and result_a["n_payments"] is not None else "",
+            "method_a_growth_window_years": result_a["growth_window_years"] if result_a and result_a["growth_window_years"] is not None else "",
             "method_a_annual_growth_rate": round(result_a["annual_growth_rate"], 6) if result_a and result_a["annual_growth_rate"] is not None else "",
             "method_a_predicted_next_payment": round(result_a["predicted_next_payment"], 4) if result_a else "",
             "method_a_predicted_next_payment_month": result_a["predicted_next_payment_month"] if result_a else "",
@@ -539,7 +601,7 @@ def run():
 
     os.makedirs(os.path.dirname(OUTPUT_CSV), exist_ok=True)
     fieldnames = ["code", "name", "name_en", "window_start", "window_end",
-                  "method_a_n_payments", "method_a_annual_growth_rate",
+                  "method_a_n_payments", "method_a_growth_window_years", "method_a_annual_growth_rate",
                   "method_a_predicted_next_payment", "method_a_predicted_next_payment_month",
                   "method_a_predicted_next_payment_basis", "method_a_predicted_next_1yr_total",
                   "method_a_n_slots_predicted", "method_a_n_slots_total",
