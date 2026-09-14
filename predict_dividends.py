@@ -1,23 +1,49 @@
 """
-Predict each ticker's next dividend payment two different ways, both
-using only the trailing 1 year of payments (not the fund's whole
-multi-year history):
+Predict each ticker's next dividend payment two different ways:
 
   Method A -- growth rate: assumes the dividend *amount* grows at a
-  constant rate. Computes the growth ratio between each consecutive pair
-  of payments, takes the geometric mean of those ratios, and applies it
+  constant annual rate. Compares the trailing-12-month total payout to
+  the 12-month total before that (see FREQUENCY FIX below for why annual
+  TOTALS, not individual payments) and applies the resulting growth rate
   to the most recent payment.
 
   Method B -- yield: assumes the dividend *yield* (dividend / share
   price) holds roughly steady, which can fit an ETF better since payout
   scales with the fund's price/NAV level rather than following its own
-  growth curve. Matches each payment to the share price on/before that
+  growth curve. Matches each payment (still using just the trailing 1
+  year, unlike Method A -- see below) to the share price on/before that
   date, averages the resulting yields, and multiplies by the latest
   share price.
 
 Both are printed and saved side by side per ticker so they can be
 compared directly -- see the CAVEATS section below for why they often
 disagree and what that disagreement means.
+
+FREQUENCY FIX (2026-09-14, by explicit request)
+------------------------------------------------
+Method A used to compute the growth ratio between each consecutive PAIR
+of payments in the trailing 1 year and geometric-mean those ratios. That
+silently broke for any ticker paying more than once a year: with
+semi-annual payments (0050, 006208), the "growth ratio" between January's
+and July's payment is really measuring the fund's normal seasonal split
+between the two periods, not a real trend -- a fund that always pays more
+in January than July would show a large "decline" every single year
+even with flat or growing total payouts. This was already called out as
+a known limitation in this module's own CAVEATS, but never fixed.
+
+`ddm_valuation.py`'s two growth models already avoid this exact problem,
+by aggregating every payment into CALENDAR-YEAR totals
+(build_annual_dividend_series) before fitting any growth rate -- a full
+year's total is directly comparable to the next, regardless of how many
+payments made it up. Method A now does the scaled-down equivalent of
+that: compare the trailing-12-month total to the 12-month total before
+it (two ROLLING years, not calendar years, to stay consistent with the
+"trailing 1 year, not the fund's whole history" design elsewhere in this
+module), and grow the most recent payment by that single annual growth
+rate. This needs ~2 years of payment history now, not 1 (there must be a
+full prior 12-month period to compare against) -- a ticker with less
+history reports Method A as "insufficient data" (Method B still works
+off however many payments exist within 1 year, unchanged).
 
 Usage:
     python predict_dividends.py
@@ -28,14 +54,15 @@ data/dividends/dividend_prediction.csv and prints a summary.
 
 CAVEATS (read before trusting the output)
 ------------------------------------------
-- Very small samples: these ETFs pay 2-4 times/year, so each method
-  averages just 1-3 numbers over the trailing year. A single unusual
-  payment can swing either prediction a lot.
-- Method A, twice-a-year tickers (0050, 006208): the one growth ratio
-  compares *different* months (e.g. January's payment to July's), not
-  the same month a year apart -- a fund that routinely pays more in one
-  period than the other will show that seasonal gap as "growth" even
-  with no real trend behind it.
+- Very small samples: these ETFs pay 2-4 times/year, so Method B
+  averages just 1-4 numbers over the trailing year, and Method A's
+  annual growth rate is a single ratio of two 12-month totals (not
+  averaged over many periods) -- a single unusual payment can still
+  swing either prediction a lot, just no longer via a seasonal-timing
+  artifact (see FREQUENCY FIX above).
+- Method A assumes the fund's overall payout growth applies evenly to
+  whichever payment comes next, even though real funds don't
+  necessarily raise every payment in a year by the same percentage.
 - Method B: matches dividends to prices by date (closing price on or
   just before the payment date) -- approximate, not an exact ex-dividend
   price adjustment. It also assumes the trailing-year average yield
@@ -136,37 +163,46 @@ def last_year_window(payments):
     return window_start, latest_date, windowed
 
 
-def method_a_growth_rate(windowed_payments):
-    """Geometric mean of payment-to-payment growth. Returns a dict of
-    results, or None if fewer than 2 payments in the window."""
-    amounts = [amt for _, amt in windowed_payments]
-    if len(amounts) < 2:
+def method_a_growth_rate(all_payments, window_start, window_end):
+    """Frequency-agnostic annual growth rate (see FREQUENCY FIX in the
+    module docstring for why): compares the CURRENT trailing-12-month
+    total (window_start, window_end], as already computed by
+    last_year_window()) to the trailing-12-month total immediately
+    before it -- the same rolling window shifted back one year. Applies
+    that single growth rate to the most recent payment to predict the
+    next one.
+
+    all_payments: this ticker's FULL payment history (any order) -- not
+    just the trailing-1yr window, since the "prior year" comparison
+    period falls entirely outside it.
+
+    Returns a dict, or None if the prior 12-month period has no (or
+    zero-total) payments -- i.e. there isn't a full second year of
+    history to compare against yet."""
+    current_window = sorted((d, amt) for d, amt in all_payments if window_start < d <= window_end)
+    current_total = sum(amt for _, amt in current_window)
+    if not current_window or current_total <= 0:
         return None
 
-    ratios = []
-    for prev_v, cur_v in zip(amounts, amounts[1:]):
-        if prev_v > 0:
-            ratios.append(cur_v / prev_v - 1)
-    if not ratios:
-        return None
+    prior_window_start = window_start - timedelta(days=WINDOW_DAYS)
+    prior_window = [(d, amt) for d, amt in all_payments if prior_window_start < d <= window_start]
+    prior_total = sum(amt for _, amt in prior_window)
+    if prior_total <= 0:
+        return None  # no full prior year of payments to compare against yet
 
-    product = 1.0
-    for r in ratios:
-        product *= (1 + r)
-    gm = product ** (1 / len(ratios)) - 1
-
-    last_amount = amounts[-1]
-    predicted_next = last_amount * (1 + gm)
-    trailing_total = sum(amounts)
+    growth = current_total / prior_total - 1
+    last_amount = current_window[-1][1]
+    predicted_next = last_amount * (1 + growth)
 
     return {
-        "n_payments": len(amounts),
-        "ratios": ratios,
-        "geometric_mean_growth": gm,
+        "n_payments": len(current_window),
+        "n_payments_prior_year": len(prior_window),
+        "annual_growth_rate": growth,
         "last_payment_amount": last_amount,
         "predicted_next_payment": predicted_next,
-        "trailing_1yr_total": trailing_total,
-        "predicted_next_1yr_total": trailing_total * (1 + gm),
+        "trailing_1yr_total": current_total,
+        "prior_1yr_total": prior_total,
+        "predicted_next_1yr_total": current_total * (1 + growth),
     }
 
 
@@ -214,19 +250,20 @@ def run():
         window_start, window_end, windowed = last_year_window(rows_by_code[code])
         prices = load_prices(code)
 
-        result_a = method_a_growth_rate(windowed)
+        result_a = method_a_growth_rate(rows_by_code[code], window_start, window_end)
         result_b = method_b_yield(windowed, prices)
 
         name_en = meta[code]["name_en"]
-        label_a = f"{result_a['predicted_next_payment']:.4f} (GM {result_a['geometric_mean_growth']*100:+.1f}%)" if result_a else "insufficient data"
+        label_a = f"{result_a['predicted_next_payment']:.4f} (annual growth {result_a['annual_growth_rate']*100:+.1f}%)" if result_a else "insufficient data"
         label_b = f"{result_b['predicted_next_payment']:.4f} (yield {result_b['mean_yield']*100:.3f}%)" if result_b else "no price data"
         print(f"{code:<8}{name_en:<10}{label_a:<28}{label_b}")
 
         if result_a:
-            print("    [A] payments used: " + ", ".join(f"{d.isoformat()}={amt:.4f}" for d, amt in windowed))
-            print("    [A] growth ratios: " + ", ".join(f"{r * 100:+.1f}%" for r in result_a["ratios"]))
-            print(f"    [A] trailing 1yr total: {result_a['trailing_1yr_total']:.4f}  ->  "
-                  f"projected next-1yr total: {result_a['predicted_next_1yr_total']:.4f}")
+            print("    [A] trailing-1yr payments: " + ", ".join(f"{d.isoformat()}={amt:.4f}" for d, amt in windowed))
+            print(f"    [A] trailing 1yr total: {result_a['trailing_1yr_total']:.4f}  vs.  "
+                  f"prior 1yr total: {result_a['prior_1yr_total']:.4f} ({result_a['n_payments_prior_year']} payment(s))  "
+                  f"->  annual growth rate: {result_a['annual_growth_rate']*100:+.1f}%")
+            print(f"    [A] projected next-1yr total: {result_a['predicted_next_1yr_total']:.4f}")
         if result_b:
             print("    [B] payment/price/yield: " + ", ".join(
                 f"{d.isoformat()}: div={amt:.4f} price={p:.2f} yield={y*100:.3f}%"
@@ -241,7 +278,7 @@ def run():
             "window_start": window_start.isoformat(),
             "window_end": window_end.isoformat(),
             "method_a_n_payments": result_a["n_payments"] if result_a else "",
-            "method_a_geometric_mean_growth": round(result_a["geometric_mean_growth"], 6) if result_a else "",
+            "method_a_annual_growth_rate": round(result_a["annual_growth_rate"], 6) if result_a else "",
             "method_a_predicted_next_payment": round(result_a["predicted_next_payment"], 4) if result_a else "",
             "method_a_predicted_next_1yr_total": round(result_a["predicted_next_1yr_total"], 4) if result_a else "",
             "method_b_n_payments": result_b["n_payments"] if result_b else "",
@@ -252,7 +289,7 @@ def run():
 
     os.makedirs(os.path.dirname(OUTPUT_CSV), exist_ok=True)
     fieldnames = ["code", "name", "name_en", "window_start", "window_end",
-                  "method_a_n_payments", "method_a_geometric_mean_growth",
+                  "method_a_n_payments", "method_a_annual_growth_rate",
                   "method_a_predicted_next_payment", "method_a_predicted_next_1yr_total",
                   "method_b_n_payments", "method_b_mean_yield", "method_b_latest_price",
                   "method_b_predicted_next_payment"]

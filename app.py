@@ -301,7 +301,7 @@ DIVIDEND_PREDICTION_COLUMNS_ZH = {
     "code": "代號", "name": "中文名稱", "name_en": "英文名稱",
     "window_start": "統計起始日", "window_end": "統計結束日",
     "method_a_n_payments": "方法A_配息次數",
-    "method_a_geometric_mean_growth": "方法A_幾何平均成長率",
+    "method_a_annual_growth_rate": "方法A_年增率",
     "method_a_predicted_next_payment": "方法A_預測下次配息",
     "method_a_predicted_next_1yr_total": "方法A_預測未來1年總配息",
     "method_b_n_payments": "方法B_配息次數",

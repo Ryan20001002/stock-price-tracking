@@ -411,12 +411,23 @@ around by years-old performance. It then computes two predictions from
 that same window:
 
 - **Method A -- growth rate**: assumes the dividend *amount* grows at a
-  constant rate. Computes the growth ratio between each consecutive pair
-  of payments (`r_i = payment_i / payment_(i-1) - 1`), takes the
-  **geometric mean** of those ratios -- `GM = (prod(1 + r_i)) ** (1/n) - 1`
-  (the correct way to average growth *rates*, since compounding is
-  multiplicative; an arithmetic mean would overstate it) -- and predicts
-  next payment = most recent payment × (1 + GM).
+  constant annual rate. **(Frequency fix, 2026-09-14)** The rate is
+  computed by comparing the trailing-12-month **total** of payments to
+  the 12-month total immediately before that -- a rolling year-over-year
+  comparison, not a payment-to-payment ratio. This matters because a
+  fund's payments aren't evenly sized across the year: 0050 and 006208,
+  for instance, consistently pay more in January than July every year.
+  Comparing consecutive payments (the old approach) mistook that normal
+  seasonal split for "growth" or "decline" depending on which half of the
+  year you looked at; comparing full trailing years to each other cancels
+  the seasonal pattern out and isolates real year-over-year change,
+  regardless of whether a fund pays annually, semi-annually, or
+  quarterly. The resulting annual growth rate is then applied directly to
+  the most recent payment to predict the next one: next payment = most
+  recent payment × (1 + annual growth rate). Needs roughly 2 years of
+  payment history to compute (a full trailing year plus a full prior year
+  to compare it to); with less than that, Method A reports "insufficient
+  data."
 - **Method B -- yield**: assumes the dividend *yield* (dividend ÷ share
   price) holds roughly steady, which can fit an ETF better since payout
   scales with the fund's price/NAV level rather than its own growth
@@ -452,42 +463,55 @@ splitting, say -- there's been speculation about this, unconfirmed) gets
 flagged instead of silently corrupting results. If that warning ever
 fires, verify it and add the real event to `KNOWN_SPLITS`.
 
-**Latest run** (against the data pulled above):
+**Latest run** (against the data pulled above, using the frequency-fixed
+Method A):
 
-| Ticker | Payments used (trailing 1yr) | Method A: geometric mean growth | Method A prediction | Method B: mean yield | Method B prediction |
-|---|---|---|---|---|---|
-| 0050 (元大台灣50) | 2 (2026-01-22: 1.00, 2026-07-21: 0.60) | -40.0% | 0.3600 | 0.989% (price 109.90) | **1.0870** |
-| 006208 (富邦台50) | 2 (2025-11-18: 3.448, 2026-07-16: 4.75) | +37.8% | 6.5436 | 2.226% (price 251.65) | **5.6027** |
-| 00878 (國泰永續高股息) | 4 (0.40, 0.42, 0.66, 1.01) | +36.2% | 1.3753 | 2.325% (price 34.39) | **0.7994** |
+| Ticker | Trailing 1yr total | Prior 1yr total | Method A: annual growth | Method A prediction | Method B: mean yield | Method B prediction |
+|---|---|---|---|---|---|---|
+| 0050 (元大台灣50) | 1.6000 (2026-01-22: 1.00, 2026-07-21: 0.60) | 0.5288 (split-adjusted) | +202.6% | 1.8156 | 0.989% (price 109.90) | **1.0870** |
+| 006208 (富邦台50) | 8.1980 (2025-11-18: 3.448, 2026-07-16: 4.75) | 1.8890 | +334.0% | 20.6143 | 2.226% (price 251.65) | **5.6027** |
+| 00878 (國泰永續高股息) | 2.4900 (0.40, 0.42, 0.66, 1.01) | 1.9200 | +29.7% | 1.3098 | 2.325% (price 34.39) | **0.7994** |
 
-The two methods disagree quite a bit, which is itself informative:
+The two methods disagree quite a bit, and this run also shows two real
+caveats with the fixed Method A worth understanding rather than taking
+the numbers at face value:
 
-- **0050**: Method A sees a big drop (Jul payment was 40% below Jan's)
-  and extrapolates that decline. But 0050's price also rallied hard in
-  the same window (71.80 -> 109.90, +53%), so Method B reads the smaller
-  payment as "yield temporarily compressed while price ran up," not
-  "payouts are shrinking" -- and predicts *higher* instead. Which story
-  is right depends on whether that price rally reflects the underlying
-  holdings' value (Method B's logic holds) or something else.
-- **00878**: Method A extrapolates the recent acceleration (+5%, +57%,
-  +53% in a row) and predicts above the last actual payment (1.3753 vs.
-  1.01). Method B reverts toward the year's *average* yield (2.325%),
-  below the most recent yield (3.119%), so it predicts *below* the last
-  actual payment (0.7994). If 00878's payout trend is genuinely
-  accelerating, Method B will underestimate; if the recent high payment
-  was a temporary spike, Method A will overestimate.
+- **0050 -- a split can distort the growth rate for about a year
+  afterwards.** 0050's *prior* trailing-year window (2025-01-17 and
+  2025-07-21) straddles its 2025-06-18 split: the January payment predates
+  the split and gets divided by 4 to stay in current-share terms, while
+  the July payment doesn't need adjusting. That drags the prior-year
+  total down to 0.5288, well below what it would be if both payments were
+  on the same side of the split -- which is why Method A's growth rate
+  here (+202.6%) is so much larger than 006208's or 00878's underlying
+  payout trend would suggest. This isn't a bug in the split-adjustment
+  math (it's doing exactly what it's supposed to: keeping everything in
+  current-share terms) -- it's an inherent limit of comparing trailing
+  years across a split boundary using only 2 years of history. It self-corrects
+  once a full year has passed with no comparison window touching the
+  split date; until then, treat 0050's Method A number with extra
+  skepticism.
+- **006208 -- Method A isn't outlier-robust.** Its trailing-year total
+  (8.198) is genuinely much larger than the prior year's (1.889) in the
+  raw data itself -- both payments roughly quadrupled year-over-year
+  (0.9 -> 3.448, 0.989 -> 4.75), not a seasonal or split artifact. Method
+  A takes that at face value and extrapolates a +334% annual growth rate
+  forward, which is a large bet on one unusually large pair of payments
+  continuing. Method B's yield-based prediction (5.6027) is far more
+  conservative because it anchors to price rather than compounding the
+  recent jump.
+- **00878** is the cleanest read here: 4 payments/year, no split, no
+  single outsized payment -- Method A's +29.7% and Method B's yield-based
+  prediction (0.7994) bracket a plausible range without either being
+  distorted by the artifacts above.
 
 Neither method is "more correct" in general -- they encode different
 assumptions about *why* a fund's distribution changes (chasing a target
 dollar amount vs. chasing a target yield), and this data doesn't settle
-which fits better yet. Also keep in mind: with only 2 payments/year
-(0050, 006208), Method A's one growth ratio compares *different* months
-(e.g. January's payment to July's), not the same month a year apart, so
-a fund's normal seasonal pattern can look like "growth" even with no real
-trend behind it -- 00878's 4-payments/year number is sturdier on that
-front. See `predict_dividends.py`'s docstring for the full caveat list.
-Worth watching both against whatever the next real payment turns out to
-be. Treat both as transparent baselines, not investment advice.
+which fits better yet. See `predict_dividends.py`'s docstring for the
+full caveat list (including the two above). Worth watching both against
+whatever the next real payment turns out to be. Treat both as transparent
+baselines, not investment advice.
 
 ## DDM valuation: is the current price justified by future dividends?
 
