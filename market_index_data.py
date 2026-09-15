@@ -254,19 +254,51 @@ data API directly (blocked by robots.txt for WebFetch) -- the real
 `yf.Ticker("^TWOII").history(...)` error message, from the user's own
 machine, is the actual confirmation.
 
-**Fix applied**: `fetch_index()`'s yfinance call now passes
+**First fix applied**: `fetch_index()`'s yfinance call now passes
 `raise_errors=True` (a real, documented `.history()` parameter). Before this,
 yfinance could return a bare empty DataFrame with NO exception at all on
 failure -- indistinguishable from "genuinely no trading today" -- which is
 exactly what silently happened for `^TWOII` for two months. With
 `raise_errors=True`, the same failure now raises (typically
 `YFPricesMissingError`, e.g. "possibly delisted; no price data found"),
-which is caught and printed -- so the next run's console output should
-finally say WHY, instead of just "no data returned". This is a visibility
-fix, not a guessed workaround -- if `^TWOII` really has been dropped by
-Yahoo's global feed, no amount of retrying fixes that on its own, and the
-next step from there would be finding whichever symbol (if any) Yahoo has
-replaced it with.
+which is caught and printed. This alone did NOT fix the gap (the user
+re-ran and reported "still the same") -- see the SECOND, actual bug below.
+
+**SECOND fix (2026-09-15, same day, the REAL root cause)**: re-reading
+`fetch_index()`'s incremental logic line by line surfaced a genuine code
+bug, independent of whatever Yahoo/yfinance is or isn't doing for
+`^TWOII` specifically -- this alone can fully explain a persistent gap
+that never self-heals even if the underlying data source is fine:
+
+  `start = date.fromisoformat(max(existing.keys()))` computed the fetch's
+  start date from the LATEST key in `existing` -- but `existing` includes
+  every row on file, including the blank-OHLC/TradeValue-only placeholder
+  rows `fetch_taiex_trade_value()`/`fetch_tpex_trade_value()` write for a
+  date their report has but yfinance hasn't supplied OHLC for yet. Once
+  `fetch_tpex_trade_value()` had written a placeholder row for every date
+  in the 2026-07-20 gap (one more added each run, per that run's own
+  trade-value fetch), `max(existing.keys())` kept getting dragged forward
+  to the LATEST such placeholder date -- effectively "today" -- on every
+  subsequent run. That means `fetch_index()` was only ever asking yfinance
+  for a tiny window starting almost at the present, and NEVER once
+  re-requested the actual gap dates before it, no matter how many times it
+  ran or whether `^TWOII` itself was working normally that day. This is
+  consistent with "still the same" after the `raise_errors=True` fix alone:
+  if yfinance happened to return even one valid recent bar with no
+  exception, the console would print success, not an error -- while the
+  35-day gap underneath stayed exactly as blank as before, because it was
+  never re-requested.
+
+  **Fix**: new `_latest_real_ohlc_date()` -- same idea as
+  `_find_contaminated_dates()`'s existing self-heal pattern -- returns the
+  latest date with a REAL (non-blank) Close on file, explicitly excluding
+  placeholder rows. `fetch_index()`'s normal incremental case now starts
+  from THAT date instead of `max(existing.keys())`, so the next run
+  correctly re-requests the whole gap through today again, regardless of
+  which run originally caused it. Combined with `raise_errors=True` above:
+  if `^TWOII` is genuinely broken on Yahoo's side, this will now show a
+  real per-run error message; if it isn't (this code bug was the whole
+  story), the gap should now backfill on the very next run.
 """
 
 import os
@@ -519,6 +551,33 @@ def _rows_from_history(hist):
     return rows
 
 
+def _latest_real_ohlc_date(existing_rows):
+    """The latest date in existing_rows that has REAL OHLC on file (a
+    non-blank Close) -- deliberately excludes TradeValue-only placeholder
+    rows (the ones fetch_taiex_trade_value()/fetch_tpex_trade_value()
+    write for a date their report has but yfinance hasn't supplied OHLC
+    for yet: Open/High/Low/Close/Volume all blank, only TradeValue set).
+    Returns None if there are no rows with real OHLC at all.
+
+    THE TPEX OHLC GAP BUG (found 2026-09-15, after raise_errors=True alone
+    didn't fix the user's reported gap): fetch_index()'s old incremental
+    logic computed its start date as `max(existing.keys())` -- ALL keys,
+    placeholder rows included. Once fetch_tpex_trade_value() had written
+    blank-OHLC placeholder rows for the whole 2026-07-20..2026-09-14 gap
+    (each run adding that run's date), `max(existing.keys())` kept getting
+    dragged forward to the LATEST such placeholder date -- e.g. "today" --
+    so fetch_index() only ever asked yfinance for a tiny window starting
+    almost at the present, and never once re-requested the actual gap
+    dates before it. This happened regardless of whether `^TWOII` itself
+    was working: even a fully healthy yfinance call could never backfill
+    those older blank rows under the old logic, because they were never
+    included in the requested date range again. Using the latest REAL
+    OHLC date instead (here) means `start` correctly walks back to before
+    the whole gap, so every gap date gets re-requested on the next run."""
+    real_dates = [iso for iso, row in existing_rows.items() if row.get("Close")]
+    return max(real_dates) if real_dates else None
+
+
 def _find_contaminated_dates(existing_rows):
     """Dates whose on-file Volume is implausibly large to be real TAIEX/
     TPEx Volume -- i.e. it can only have been written by the ORIGINAL bug
@@ -558,11 +617,22 @@ def fetch_index(code, yf_symbol, name_label):
                   f"whole-market figure) -- re-fetching from {start.isoformat()} onward to repair them")
         else:
             # Normal incremental case: re-fetch starting from the latest
-            # date already on file (inclusive, to reconfirm a possibly-
-            # partial last day) through today -- same "always reconfirm
-            # the most recent point" idea price_data.py uses for its most
-            # recent month.
-            start = date.fromisoformat(max(existing.keys()))
+            # date that has REAL OHLC already on file (inclusive, to
+            # reconfirm a possibly-partial last day) through today -- same
+            # "always reconfirm the most recent point" idea price_data.py
+            # uses for its most recent month. Deliberately NOT
+            # `max(existing.keys())` -- see _latest_real_ohlc_date()'s
+            # docstring (the TPEX OHLC GAP BUG) for why that was wrong: it
+            # let TradeValue-only placeholder rows drag `start` past a
+            # real, unfilled gap that then could never be re-requested.
+            latest_real = _latest_real_ohlc_date(existing)
+            if latest_real is not None:
+                start = date.fromisoformat(latest_real)
+            else:
+                # Every row on file is a TradeValue-only placeholder (no
+                # real OHLC anywhere yet) -- treat this the same as a
+                # brand-new CSV rather than picking an arbitrary date.
+                start = date.today() - timedelta(days=PRICE_HISTORY_MONTHS * 31)
     else:
         start = date.today() - timedelta(days=PRICE_HISTORY_MONTHS * 31)
 
