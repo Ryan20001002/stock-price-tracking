@@ -75,7 +75,9 @@ context:
     old TWSE T86 approach, see that module's docstring). So TPEx's
     TradeValue is left BLANK (not fabricated, not silently zero) rather
     than presented as real data it isn't -- see the CAVEATS section and
-    app.py's UI caption for how this is surfaced.
+    app.py's UI caption for how this is surfaced. **SUPERSEDED the same
+    day -- see the TPEX TRADE VALUE ADDED section below: a real free
+    source for this WAS found after all, later the same day.**
 
 CORRECTION (2026-09-15, same day, in response to a real user report):
 the FIRST version of this feature also overwrote TAIEX's `Volume` with
@@ -142,6 +144,78 @@ i.e. a harder separation than the CORRECTION made. Two things changed:
      latest existing date, so yfinance re-fetches (and overwrites) every
      contaminated row automatically, with no manual CSV surgery needed
      from the user. See `_find_contaminated_dates()` below.
+
+TPEX TRADE VALUE ADDED (2026-09-15, same day, by explicit follow-up
+request -- "How about fetch these numbers on tpex.org.tw?", after the user
+asked why TPEx's TradeValue never shows up): the TRADING VOLUME / TRADING
+VALUE section above said no free whole-market TPEx source could be found
+-- that conclusion didn't hold up. Further web research turned up TPEx's
+own "日成交量值指數" (Daily Volume & Index) report,
+`st41_result.php`, at
+https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_index/st41_result.php
+-- TPEx's real equivalent of TWSE's FMTQIK, month-scoped the same way
+(`d=<ROC year>/<month>`, e.g. `115/08` for August 2026, returning every
+trading day in that month in one response). Since this sandbox's own
+network access to tpex.org.tw is blocked (confirmed again -- every path
+under /web/ 403s; see the earlier TRADING VOLUME / TRADING VALUE section),
+this endpoint could NOT be verified by directly fetching it from here.
+Instead, the user opened the URL directly in their own browser (normal,
+unsandboxed internet access) and pasted back the real response --
+**CONFIRMED LIVE via the user's own machine, not guessed from
+documentation**. Confirmed real response shape (August 2026, 21 trading
+days returned for one request):
+
+    {"tables": [{"data": [["115/08/03", "682,447", "132,226,012",
+                            "654,724", 362.89, 15.04], ...],
+                 "fields": ["日期","成交張數","金額（仟元）","筆數",
+                            "櫃買指數","漲/跌"],
+                 "totalCount": 21}],
+     "stat": "ok"}
+
+Two unit conversions this report needs that FMTQIK's doesn't (confirmed
+from the real response, not assumed):
+  - `成交張數` (index 1) is in 張 -- board lots of 1,000 shares each -- not
+    raw shares like FMTQIK's `成交股數`. Multiply by 1,000 for a
+    shares-equivalent figure (kept in `_fetch_tpex_turnover()`'s return
+    tuple for parity with `_fetch_taiex_turnover()`, but -- consistent
+    with the rest of this module -- never applied to TPEx's `Volume`
+    column, which stays yfinance-only; see the CORRECTION and RESTRUCTURED
+    sections above for why that separation matters).
+  - `金額（仟元）` (index 2) is in thousands of NT dollars, not raw NT
+    dollars like FMTQIK's `成交金額`. Multiply by 1,000 to store the same
+    unit this project's TradeValue column already uses for TAIEX.
+  - Sanity-checked the conversion against the real numbers themselves:
+    682,447 張 x 1,000 = 682,447,000 shares; at that volume, the reported
+    132,226,012 (x1,000 =) NT$132.2 billion trade value implies an average
+    price around NT$194/share -- a plausible whole-OTC-market average,
+    which is the kind of cross-check this project's docstrings favor over
+    trusting a field label alone.
+  - The index-close and change fields (indices 4/5) come back as actual
+    JSON numbers in the real response, not comma-formatted strings like
+    the rest of the row -- `_num()` isn't even called on them, since
+    `_fetch_tpex_turnover()` only needs indices 1/2.
+
+**Implemented as a fully separate function, `fetch_tpex_trade_value()`,
+mirroring `fetch_taiex_trade_value()` exactly** (per the RESTRUCTURED
+section's established pattern) -- it only ever touches the `TradeValue`
+field of rows already on file for TPEX.csv, never Open/High/Low/
+Close/Volume. `run()` now calls both TradeValue functions.
+
+**Remaining caveats, same honesty standard as every other TPEx-related
+piece of this module:**
+  - This endpoint's actual HTTP behavior (headers, retry needs, whether it
+    blocks non-browser User-Agents the way tpex.org.tw's other paths seem
+    to from this sandbox) has never been exercised by real Python code --
+    only by the user's own browser. `tpex_client.py` was written to the
+    same retry/backoff standard as `twse_client.py`, but its first REAL
+    request only happens on the user's own first `--market-index` run.
+  - **The user separately reported this report's own site only keeps
+    about a year of history** -- a request for an older month is expected
+    to come back with no/empty data, not an error, and is handled the
+    same defensive way as FMTQIK's "no trading days yet this month" case
+    (skip, don't abort the rest of the backfill). This means TPEx's
+    TradeValue backfill will likely stay shorter than TAIEX's and the
+    OHLC data's `PRICE_HISTORY_MONTHS` (36 months) -- not a bug if so.
 """
 
 import os
@@ -151,6 +225,7 @@ import pandas as pd
 import yfinance as yf
 
 import twse_client
+import tpex_client
 from config import DATA_DIR, PRICE_HISTORY_MONTHS
 
 INDEXES = [
@@ -158,13 +233,13 @@ INDEXES = [
     {"code": "TPEX", "yf_symbol": "^TWOII", "name": "櫃買指數", "name_en": "TPEx Index"},
 ]
 
-# Only TAIEX has a verified free whole-market turnover source (TWSE's
-# FMTQIK -- see module docstring); TPEx's TradeValue stays blank.
-TURNOVER_SOURCE_CODES = {"TAIEX"}
-
 FIELDNAMES = ["Date", "Open", "High", "Low", "Close", "Volume", "TradeValue"]
 
 FMTQIK_URL = "https://www.twse.com.tw/exchangeReport/FMTQIK"
+
+# TPEx's own equivalent of FMTQIK -- see the module docstring's TPEX TRADE
+# VALUE ADDED section for the confirmed response shape and unit conversions.
+TPEX_TURNOVER_URL = "https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_index/st41_result.php"
 
 # A Volume figure above this can only ever have come from the ORIGINAL bug
 # (FMTQIK's whole-TWSE-market 成交股數 written into Volume) -- real TAIEX/
@@ -299,6 +374,62 @@ def _fetch_taiex_turnover(existing_rows):
     return result
 
 
+def _fetch_tpex_turnover(existing_rows):
+    """Returns {iso_date: (shares, ntd_value)} for the whole TPEx (OTC)
+    market's daily turnover, from TPEx's own "日成交量值指數" report
+    (`st41_result.php`) -- see the module docstring's TPEX TRADE VALUE
+    ADDED section for how this was found and CONFIRMED LIVE (by the user
+    opening the URL in their own browser, since this sandbox can't reach
+    tpex.org.tw). Confirmed response shape, requesting `d=<ROC year>/<MM>`
+    (e.g. "115/08"):
+
+        {"tables": [{"data": [["115/08/03", "682,447", "132,226,012",
+                                "654,724", 362.89, 15.04], ...],
+                     "fields": ["日期","成交張數","金額（仟元）","筆數",
+                                "櫃買指數","漲/跌"]}],
+         "stat": "ok"}
+
+    Two unit conversions this report needs that FMTQIK's doesn't (see
+    docstring for the numbers this was sanity-checked against):
+      - `成交張數` (index 1) is in 張 (board lots of 1,000 shares) --
+        multiplied by 1,000 here for a shares-equivalent figure.
+      - `金額（仟元）` (index 2) is in thousands of NT dollars --
+        multiplied by 1,000 here to match FMTQIK's/this project's raw-NTD
+        TradeValue convention.
+    Same month-by-month incremental strategy as `_fetch_taiex_turnover()`.
+    A month outside TPEx's own retention window for this report (the user
+    reported it's roughly a year) is expected to come back with no usable
+    data -- handled the same defensive way as FMTQIK's "no trading days
+    yet this month" case: skip it, don't abort the rest of the backfill."""
+    result = {}
+    present_months = _months_with_turnover(existing_rows)
+    target_months = _month_starts(PRICE_HISTORY_MONTHS)
+    latest_present = max(present_months) if present_months else None
+
+    for (y, m) in target_months:
+        if (y, m) in present_months and (y, m) != latest_present:
+            continue
+        roc_param = f"{y - 1911}/{m:02d}"
+        payload = tpex_client.get_json(
+            TPEX_TURNOVER_URL, params={"l": "zh-tw", "d": roc_param, "o": "json"}
+        )
+        if not payload or payload.get("stat") != "ok":
+            continue  # common/expected: no data yet, or outside TPEx's own retention window
+        tables = payload.get("tables") or []
+        if not tables:
+            continue
+        for row in tables[0].get("data", []):
+            try:
+                iso = _roc_to_iso(row[0])
+            except (ValueError, IndexError):
+                continue
+            lots = _num(row[1]) if len(row) > 1 else None
+            thousands_ntd = _num(row[2]) if len(row) > 2 else None
+            if lots is not None and thousands_ntd is not None:
+                result[iso] = (lots * 1000, thousands_ntd * 1000)
+    return result
+
+
 def _rows_from_history(hist):
     """hist: a yfinance .history() DataFrame (DatetimeIndex, Open/High/
     Low/Close/Volume columns, possibly also Dividends/Stock Splits which
@@ -328,9 +459,10 @@ def _rows_from_history(hist):
             # real bug, caught via a live comparison against Yahoo
             # Finance's own site).
             "Volume": int(row["Volume"]) if pd.notna(row.get("Volume")) else "",
-            # TradeValue has no yfinance equivalent at all -- filled in
-            # for TAIEX only, in fetch_index() below; stays blank for
-            # TPEx (no verified free whole-market source -- see docstring).
+            # TradeValue has no yfinance equivalent at all -- this fetch
+            # never touches it either way; it's filled in separately by
+            # fetch_taiex_trade_value()/fetch_tpex_trade_value() below,
+            # each writing only their own index's file.
             "TradeValue": "",
         }
     return rows
@@ -404,10 +536,11 @@ def fetch_taiex_trade_value():
     成交金額 -- see module docstring). Added 2026-09-15 as a hard split
     from fetch_index(), by explicit request, so this function ONLY ever
     reads and updates the `TradeValue` field of whatever rows are already
-    on file for TAIEX.csv -- it never touches Open/High/Low/Close/Volume,
-    and it isn't called for TPEx (no verified free whole-market source for
-    TPEx -- see docstring). Safe to run on its own, independent of
-    fetch_index()."""
+    on file for TAIEX.csv -- it never touches Open/High/Low/Close/Volume.
+    TPEx has its own separate, symmetric function,
+    fetch_tpex_trade_value() below (added later the same day, once a free
+    TPEx source was found -- see module docstring). Safe to run on its
+    own, independent of fetch_index()."""
     code = "TAIEX"
     print(f"[market_index] {code} trade value (TWSE FMTQIK)")
     existing = _load_existing(code)
@@ -434,10 +567,48 @@ def fetch_taiex_trade_value():
     print(f"  -> {len(turnover)} day(s) of TWSE 成交金額 merged in (FMTQIK)")
 
 
+def fetch_tpex_trade_value():
+    """Separate, independent fetch for TPEx's TradeValue (TPEx's own
+    st41_result.php whole-market report -- see the module docstring's
+    TPEX TRADE VALUE ADDED section). Added 2026-09-15, mirroring
+    fetch_taiex_trade_value() exactly: only ever reads and updates the
+    `TradeValue` field of rows already on file for TPEX.csv, never
+    Open/High/Low/Close/Volume. Closes the asymmetry this module has
+    carried since TradeValue was first added (TAIEX had a verified free
+    source, TPEx didn't) -- see the module docstring's caveats for what's
+    still unverified about this specific source (never actually run from
+    this sandbox; only confirmed via the user's own browser)."""
+    code = "TPEX"
+    print(f"[market_index] {code} trade value (TPEx 日成交量值指數)")
+    existing = _load_existing(code)
+    turnover = _fetch_tpex_turnover(existing)
+    if not turnover:
+        print("  -> no data returned")
+        return
+
+    for iso, (shares, value) in turnover.items():
+        # `shares` (TPEx's 成交張數, converted to a shares-equivalent) is
+        # deliberately unused here, same reasoning as
+        # fetch_taiex_trade_value() -- it's a different quantity than
+        # TPEx's own Volume (which stays yfinance-only) and was never a
+        # valid substitute for it; this function only ever writes `value`.
+        if iso not in existing:
+            # TPEx's report covers a trading day yfinance's OHLC didn't --
+            # rare, but keep the TradeValue rather than dropping it; OHLC/
+            # Volume for this date stays blank until fetch_index() picks
+            # it up from yfinance on a later run.
+            existing[iso] = {"Date": iso, "Open": "", "High": "", "Low": "", "Close": "", "Volume": "", "TradeValue": ""}
+        existing[iso]["TradeValue"] = value
+
+    _write_csv(code, existing)
+    print(f"  -> {len(turnover)} day(s) of TPEx 成交金額 merged in (st41_result.php)")
+
+
 def run():
     for idx in INDEXES:
         fetch_index(idx["code"], idx["yf_symbol"], f'{idx["name"]} ({idx["name_en"]})')
     fetch_taiex_trade_value()
+    fetch_tpex_trade_value()
 
 
 if __name__ == "__main__":

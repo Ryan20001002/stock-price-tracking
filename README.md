@@ -441,12 +441,14 @@ summary.
   stock on the whole TWSE market**, not something specific to the TAIEX
   index itself (an index doesn't have its own "trading value" the way a
   stock does).
-- **TPEx** -- no free whole-market TradeValue source could be found
-  (TPEx's own site blocks every deeper path from this project's build
-  environment, and the one TPEx OpenAPI endpoint found is per-stock, not
-  a whole-market total). TradeValue is left genuinely **blank** for TPEx
-  rather than estimated or fabricated -- the app's 大盤指數 tab explains
-  this gap in its own caption.
+- **TPEx** -- as of this writing, no free whole-market TradeValue source
+  could be found from *this build environment* (TPEx's own site blocks
+  every deeper path from here, and the one TPEx OpenAPI endpoint found is
+  per-stock, not a whole-market total). TradeValue is left genuinely
+  **blank** for TPEx rather than estimated or fabricated -- the app's
+  大盤指數 tab explains this gap in its own caption. **Update, same day:
+  a real source WAS found after all -- see "TPEx TradeValue added" below,
+  which supersedes this bullet.**
 - **Volume (both indices)** comes from `yfinance` -- see the CORRECTION
   below for why this was reverted to plain yfinance data after briefly
   being overwritten with FMTQIK's figure.
@@ -512,6 +514,37 @@ changes:
   automatically -- no manual CSV editing needed. **If your existing
   `data/market_index/TAIEX.csv` has old rows with Volume in the billions,
   the next `--market-index` run repairs them on its own.**
+
+**TPEx TradeValue added (2026-09-15, same day, follow-up -- "How about
+fetch these numbers on tpex.org.tw?", after being asked why TPEx's
+TradeValue never showed up)**: a real free whole-market source for TPEx
+*was* found after all -- TPEx's own "日成交量值指數" (Daily Volume &
+Index) report, `st41_result.php`, TPEx's equivalent of TWSE's FMTQIK.
+Since this sandboxed build environment's network access to tpex.org.tw is
+blocked the same way it's been for everything else TPEx-related in this
+project, the endpoint and its exact response shape were **confirmed live
+by the user opening the URL directly in their own browser** and pasting
+back the real JSON, rather than guessed from documentation. TPEx's report
+uses two different units than FMTQIK's -- 成交張數 in board lots of 1,000
+shares, and 金額（仟元） in thousands of NT dollars -- both converted to
+the same raw-shares/raw-NTD convention this project already uses. A new,
+fully separate `fetch_tpex_trade_value()` function (mirroring
+`fetch_taiex_trade_value()` exactly, touching only TPEX.csv's TradeValue
+field) fetches it, via a new `tpex_client.py` (same retry/backoff design
+as `twse_client.py`, kept as its own module). **The user separately noted
+this report only keeps roughly a year of history**, so TPEx's TradeValue
+backfill will likely stay shorter than TAIEX's. Like the endpoint itself,
+`tpex_client.py`'s actual request behavior has never executed from this
+sandbox -- the user's first `--market-index` run is the real test.
+
+**Metric color fixed (2026-09-15, same day, reported live: "the color of
+the sign to show whether the index grows or decline is incorrect")**:
+the 大盤指數 tab's latest-close `st.metric` used Streamlit's default
+delta coloring (green for a gain, red for a loss -- the US/Western
+convention). Taiwan uses the opposite convention (red = up/漲, green =
+down/跌), which this project's own candlestick chart already followed
+(`CANDLESTICK_UP_COLOR` is red, `CANDLESTICK_DOWN_COLOR` is green) -- the
+metric just hadn't been set to match. Fixed with `delta_color="inverse"`.
 
 ## Keeping data fresh
 

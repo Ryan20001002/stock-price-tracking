@@ -344,10 +344,15 @@ MARKET_VALUE_COLUMNS_ZH = {
 
 # market_index_data.py's per-index CSVs (TAIEX/TPEx). Added 2026-09-15 by
 # explicit request ("add a column to store total value of transactions, and
-# add the unit for the trading quantity"): TradeValue (成交金額) is TAIEX-only,
-# sourced from TWSE's FMTQIK whole-market report -- it's genuinely blank for
-# TPEx (no verified free whole-market source found; see market_index_data.py's
-# module docstring), not zero/fabricated.
+# add the unit for the trading quantity"): TradeValue (成交金額) is sourced
+# from each exchange's own whole-market report -- TWSE's FMTQIK for TAIEX,
+# TPEx's own "日成交量值指數" (st41_result.php) for TPEX (added the same
+# day, once a free TPEx source was actually found -- see
+# market_index_data.py's module docstring's TPEX TRADE VALUE ADDED
+# section). Before that, TPEx's column was genuinely left blank (no
+# verified source), not zero/fabricated -- it can still show up blank for
+# a date TPEx's report doesn't have data for (e.g. outside that report's
+# own ~1-year retention window, per the user's own observation).
 # Volume is NOT relabeled/rescaled (plain "成交量", no unit claim) -- an
 # earlier version of this dict said 成交量（張） on the assumption Volume
 # should be FMTQIK-sourced and /1000-scaled, but a user comparison against
@@ -1039,6 +1044,17 @@ with tab_market_index:
             f"{picked_idx} {idx_names[picked_idx]} 最新收盤",
             f"{latest['Close']:.2f}",
             delta=f"{change:+.2f} ({pct:+.2f}%)" if change is not None and pct is not None else None,
+            # delta_color="inverse" (added 2026-09-15, reported live: "the
+            # color of the sign to show whether the index grows or decline
+            # is incorrect"): st.metric's default ("normal") colors a
+            # positive delta GREEN and a negative delta RED -- the US/
+            # Western financial convention. Taiwan (like the rest of East
+            # Asia) uses the OPPOSITE: red = up/漲 (gain), green = down/跌
+            # (loss) -- the same convention this project's own candlestick
+            # chart already follows (see render_candlestick's up/down
+            # colors). "inverse" flips st.metric's arrow+color pairing to
+            # match: red arrow up for a gain, green arrow down for a loss.
+            delta_color="inverse",
             help=f"資料日期：{latest['Date'].date()}",
         )
 
@@ -1101,13 +1117,12 @@ with tab_market_index:
     st.caption(
         "成交量／成交金額說明：成交量（兩指數皆同）直接取自 yfinance／"
         "Yahoo Finance 網站顯示的數字，已與 Yahoo Finance 官網核對一致。"
-        "成交金額目前僅 TAIEX 有資料，來自證交所官方「每日市場成交資訊」"
-        "報表，為上市市場整體（所有上市個股加總）的成交金額（顯示單位："
-        "億元，1億元＝100,000,000元；資料庫內仍以原始元為單位儲存）——"
-        "這是與成交量不同範圍的統計數字，並非「TAIEX指數本身」的成交"
-        "金額（指數本身並無此概念）。櫃買指數（TPEx）目前找不到可免費"
-        "取得的整體市場成交金額資料來源，因此該欄位保持空白，不會用"
-        "估計或捏造的數字填入。"
+        "成交金額分別來自兩個交易所各自公布的整體市場成交統計報表——"
+        "TAIEX 來自證交所「每日市場成交資訊」，櫃買指數來自櫃買中心"
+        "「日成交量值指數」，兩者皆為上市／上櫃市場整體（所有個股加總）"
+        "的成交金額，並非「指數本身」的成交金額（指數本身並無此概念），"
+        "顯示單位為億元（1億元＝100,000,000元；資料庫內仍以原始元為"
+        "單位儲存）。這是與成交量不同範圍的統計數字。"
     )
 
 # --- Prices ----------------------------------------------------------------------
