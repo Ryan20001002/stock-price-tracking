@@ -216,6 +216,57 @@ piece of this module:**
     (skip, don't abort the rest of the backfill). This means TPEx's
     TradeValue backfill will likely stay shorter than TAIEX's and the
     OHLC data's `PRICE_HISTORY_MONTHS` (36 months) -- not a bug if so.
+
+TPEX OHLC GAP (2026-09-15, same day, by explicit follow-up report -- the user
+uploaded their real TPEX.csv and it showed Open/High/Low/Close/Volume blank
+for every trading day from 2026-07-20 onward, ~35 trading days, with only
+TradeValue populated for those rows). Confirmed this is NOT the TradeValue
+code's fault -- that blank-OHLC-with-TradeValue row shape is the documented,
+intentional fallback (see fetch_taiex_trade_value()/fetch_tpex_trade_value()
+docstrings) for a date the trade-value report has but the OHLC source
+doesn't yet. The real problem is `fetch_index()`'s own yfinance call for
+`^TWOII` (TPEx's OHLC/Volume source) returning nothing, sustained across
+many separate runs over ~8 weeks -- not a single transient blip.
+
+By explicit request, the architecture stays exactly as the RESTRUCTURED
+section above already has it: `fetch_index()` (plain yfinance OHLC+Volume,
+the "original method") is the ONLY thing that should ever write Open/High/
+Low/Close/Volume; the TPEx trade-value report (the "new method") stays
+scoped to the TradeValue column only, same as it always has been -- nothing
+architectural changed here, only `fetch_index()`'s error visibility (see the
+`raise_errors=True` change below).
+
+Research done from this sandbox (still can't run yfinance directly here --
+same standing network restriction as everywhere else in this module) found
+a real, if not 100% conclusive, lead: `https://finance.yahoo.com/quote/%5ETWOII/`
+and its `/history/` page both currently 404 live, even though Google still
+has an old cached title for that page -- i.e. this looks like something that
+broke recently, not a page that never existed. By contrast,
+`https://tw.stock.yahoo.com/quote/%5ETWOII` (Yahoo's Taiwan-region site,
+a different backend) still shows a live price for the same symbol as of
+2026/09/03. yfinance's `.history()` calls Yahoo's global chart/query API,
+the same backend the (now-404ing) finance.yahoo.com page would have used --
+not the tw.stock.yahoo.com backend -- so this is consistent with `^TWOII`
+having been dropped from Yahoo's global data feed around the same time the
+CSV gap starts, while Taiwan's own Yahoo site keeps showing it from
+elsewhere. Not proven from here, since the sandbox can't hit Yahoo's actual
+data API directly (blocked by robots.txt for WebFetch) -- the real
+`yf.Ticker("^TWOII").history(...)` error message, from the user's own
+machine, is the actual confirmation.
+
+**Fix applied**: `fetch_index()`'s yfinance call now passes
+`raise_errors=True` (a real, documented `.history()` parameter). Before this,
+yfinance could return a bare empty DataFrame with NO exception at all on
+failure -- indistinguishable from "genuinely no trading today" -- which is
+exactly what silently happened for `^TWOII` for two months. With
+`raise_errors=True`, the same failure now raises (typically
+`YFPricesMissingError`, e.g. "possibly delisted; no price data found"),
+which is caught and printed -- so the next run's console output should
+finally say WHY, instead of just "no data returned". This is a visibility
+fix, not a guessed workaround -- if `^TWOII` really has been dropped by
+Yahoo's global feed, no amount of retrying fixes that on its own, and the
+next step from there would be finding whichever symbol (if any) Yahoo has
+replaced it with.
 """
 
 import os
@@ -516,14 +567,24 @@ def fetch_index(code, yf_symbol, name_label):
         start = date.today() - timedelta(days=PRICE_HISTORY_MONTHS * 31)
 
     try:
-        hist = yf.Ticker(yf_symbol).history(start=start.isoformat(), interval="1d")
+        # raise_errors=True (added 2026-09-15, in response to the TPEX OHLC
+        # GAP investigation -- see module docstring): without it, yfinance
+        # can silently return an empty DataFrame with NO exception at all --
+        # which is exactly what happened for `^TWOII` from 2026-07-20 onward,
+        # and gave no way to tell "genuinely no trading today" apart from
+        # "something is actually broken". With raise_errors=True, the same
+        # failure instead raises (e.g. YFPricesMissingError: "possibly
+        # delisted; no price data found"), which the except block below now
+        # prints -- so the NEXT time this happens, the console output itself
+        # says why, instead of just "no data returned".
+        hist = yf.Ticker(yf_symbol).history(start=start.isoformat(), interval="1d", raise_errors=True)
     except Exception as e:
         print(f"  [!] fetch failed: {e}")
         return
 
     new_rows = _rows_from_history(hist)
     if not new_rows:
-        print("  -> no data returned")
+        print("  -> no data returned (empty result, but no exception raised)")
         return
 
     existing.update(new_rows)
