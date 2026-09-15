@@ -427,62 +427,60 @@ output before relying on it).
 
 **Trading volume / trading value** (added 2026-09-15, by request -- "add a
 column to store total value of transactions, and add the unit for the
-trading quantity"). `yfinance` has no trading-value (turnover, in NT
-dollars) field at all for any ticker, and its Volume field is documented
-as unreliable specifically for index tickers like these two (an index
-itself isn't "traded" -- only its constituent stocks are; see
-`market_index_data.py`'s docstring for the upstream yfinance issue this is
-based on). So the two columns are sourced differently per index, and
-that's surfaced honestly rather than papered over:
+trading quantity"; **revised the same day after a real data-accuracy
+report** -- see the CORRECTION below, which supersedes the original
+Volume design). `yfinance` has no trading-value (turnover, in NT dollars)
+field at all for any ticker, so TradeValue can't come from there for
+either index. TWSE (the exchange behind TAIEX) DOES publish this for
+free, with no API key: the FMTQIK report, the whole-TWSE-market daily
+summary.
 
-- **TAIEX** -- Volume (成交量, unit: 股/shares) and TradeValue (成交金額,
-  stored unit: 元/NT dollars) both come from TWSE's own free, no-API-key
-  FMTQIK report (the whole-market daily summary), overwriting yfinance's
-  unreliable Volume figure. This is real, verified-live official exchange
-  data.
-- **TPEx** -- no free whole-market turnover source could be found (TPEx's
-  own site blocks every deeper path from this project's build
+- **TAIEX** -- TradeValue (成交金額, stored unit: 元/NT dollars, displayed
+  as 億元 in the app) comes from TWSE's FMTQIK report, verified live. This
+  is real official exchange data, but it's the sum across **every listed
+  stock on the whole TWSE market**, not something specific to the TAIEX
+  index itself (an index doesn't have its own "trading value" the way a
+  stock does).
+- **TPEx** -- no free whole-market TradeValue source could be found
+  (TPEx's own site blocks every deeper path from this project's build
   environment, and the one TPEx OpenAPI endpoint found is per-stock, not
   a whole-market total). TradeValue is left genuinely **blank** for TPEx
   rather than estimated or fabricated -- the app's 大盤指數 tab explains
-  this gap in its own caption, and skips drawing an empty TradeValue chart
-  for TPEx rather than showing a misleading blank one. TPEx's Volume still
-  comes from `yfinance` as before, with the same index-ticker reliability
-  caveat as always.
+  this gap in its own caption.
+- **Volume (both indices)** comes from `yfinance` -- see the CORRECTION
+  below for why this was reverted to plain yfinance data after briefly
+  being overwritten with FMTQIK's figure.
 
 `PRICE_COLUMNS_ZH` (股價 tab, per-ticker) labels Volume/TradeValue with
 their units on screen (成交量（股）／成交金額（元）) -- the underlying CSV
 column names themselves are unchanged (`Volume`, `TradeValue`), so nothing
 that reads those CSVs elsewhere in this project needed updating.
 
-**Trading quantity/value display units (2026-09-15, two same-day follow-up
-requests on the 大盤指數 tab)**:
-
-- **"the quantity might be incorrect"** -- raised without specifics, so
-  clarified via AskUserQuestion before changing anything (guessing at a
-  data-accuracy fix on a vague report risks fixing the wrong thing). The
-  answer: TAIEX's raw share-count Volume (billions of shares) is
-  technically correct but unfamiliar to read as a bare number. Fixed by
-  displaying it in **張** (board lots of 1,000 shares -- the standard
-  trading unit Taiwan quotes volume in), not by changing the underlying
-  data.
-- **"transform the unit of total value of transaction into 100 million
-  dollars"**: TradeValue shown in **億元** (1億＝100,000,000 元), the
-  standard unit Taiwanese financial media reports whole-market trading
-  value in (a 12-digit raw NT-dollar figure is otherwise unreadable at a
-  glance).
-
-Both are **display-only** conversions in `app.py` -- `data/market_index/
-<code>.csv` on disk keeps storing the raw share count / NT-dollar amount,
-same as every other figure in this project's CSVs, so nothing downstream
-of the CSV needed to change. `MARKET_INDEX_COLUMNS_ZH`'s labels read
-成交量（張）／成交金額（億元） accordingly; TPEx's Volume (still yfinance-
-sourced) gets the same 張 conversion, but its TradeValue stays blank as
-before (nothing to convert). The 股價 tab's per-ticker Volume/TradeValue
-are unchanged (still 股／元) -- individual stocks' daily figures are
-often small enough that 張／億元 would read awkwardly (e.g. a low-volume
-stock's TradeValue as "0.02億元"); happy to extend the same conversions
-there too if useful.
+**CORRECTION (2026-09-15, same day, in response to a real user report)**:
+an earlier version of this feature also overwrote TAIEX's `Volume` with
+FMTQIK's 成交股數 figure and displayed it in 張 (board lots of 1,000
+shares), reasoning from yfinance's own GitHub issue tracker
+(`ranaroussi/yfinance#2397`) that Volume is unreliable for index
+tickers -- but that issue is about `^NDX` (Nasdaq-100), a different
+ticker, and the assumption didn't hold for `^TWII`. The user compared
+this page's TAIEX Volume against Yahoo Finance's own `^TWII` page and
+found the numbers no longer matched, and that the figures from BEFORE
+this feature touched Volume at all HAD matched Yahoo Finance. Re-verified
+live (`WebFetch`): `finance.yahoo.com/quote/^TWII/history` shows real,
+non-zero daily Volume in the low millions (e.g. 3,967,200 to 7,217,600
+for late Aug/early Sep 2026), and `tw.stock.yahoo.com`'s `^TWII` page
+independently shows the same order of magnitude (8,705,759 "總量" on the
+day checked) -- both consistent with what yfinance itself returns, and
+NOT with FMTQIK's whole-market figure (which is in the billions -- a
+different, much larger quantity: shares summed across every individual
+TWSE-listed stock that day, not "TAIEX's own volume"). **Fix: Volume for
+both TAIEX and TPEx now comes from `yfinance` only, unmodified, with no
+unit conversion** (`MARKET_INDEX_COLUMNS_ZH`'s Volume label reads plain
+成交量, no unit claimed, since the precise unit isn't independently
+confirmed the way FMTQIK's 股/元 are). TradeValue is unaffected by this
+correction -- it still comes from FMTQIK (TAIEX only) and is still shown
+in 億元, since there's no competing yfinance figure to conflict with
+there.
 
 ## Keeping data fresh
 

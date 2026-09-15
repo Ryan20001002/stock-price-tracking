@@ -44,19 +44,17 @@ TRADING VOLUME / TRADING VALUE (added 2026-09-15, by explicit follow-up
 request -- "add a column to store total value of transactions, and add
 the unit for the trading quantity"): researched rather than assumed,
 since getting this wrong would silently present fabricated or
-meaningless numbers as real data:
+meaningless numbers as real data. This section was REVISED the same day
+after a real user report (see the CORRECTION note below) -- read that
+note first, it overrides part of the original reasoning kept here for
+context:
 
   - yfinance's `.history()` does NOT return a trading-VALUE (turnover in
     currency terms) column at all, for any ticker -- only Open/High/Low/
-    Close/Volume/Dividends/Stock Splits. And its Volume field is well
-    documented as unreliable for INDEX tickers specifically (an index
-    itself isn't "traded" -- only its constituents are): yfinance's own
-    GitHub issue tracker (ranaroussi/yfinance#2397) shows ^NDX returning
-    all-zero Volume for its entire history, closed by the maintainers as
-    "not planned." So neither figure the user asked for can honestly
-    come from yfinance.
-  - TWSE (the exchange behind TAIEX) DOES publish exactly this, for
-    free, with no API key: the FMTQIK report
+    Close/Volume/Dividends/Stock Splits. So TradeValue can't honestly
+    come from yfinance regardless of the Volume question below.
+  - TWSE (the exchange behind TAIEX) DOES publish trade value, for free,
+    with no API key: the FMTQIK report
     (https://www.twse.com.tw/exchangeReport/FMTQIK), the whole-TWSE-
     market daily summary -- 成交股數 (total shares traded, unit: 股),
     成交金額 (total trade value, unit: 元/NT dollars), 成交筆數
@@ -65,7 +63,7 @@ meaningless numbers as real data:
     `date=YYYYMM01` parameter returns that whole calendar month, exactly
     like STOCK_DAY's own convention (see price_data.py) -- so this reuses
     that same month-loop incremental pattern. This is what
-    `_fetch_taiex_turnover()` below uses for TAIEX's Volume/TradeValue.
+    `_fetch_taiex_turnover()` below uses for TAIEX's TradeValue.
   - TPEx has NO equivalent free, whole-market endpoint that could be
     found or verified (this sandbox's outbound access to tpex.org.tw
     itself returns 403 on every path deeper than its root page, and no
@@ -77,10 +75,39 @@ meaningless numbers as real data:
     old TWSE T86 approach, see that module's docstring). So TPEx's
     TradeValue is left BLANK (not fabricated, not silently zero) rather
     than presented as real data it isn't -- see the CAVEATS section and
-    app.py's UI caption for how this is surfaced. TPEx's Volume still
-    comes from yfinance as before, with the same reliability caveat as
-    above (may be 0/meaningless for this index ticker) -- that's the
-    honest state of what's available today, not a claim it's correct.
+    app.py's UI caption for how this is surfaced.
+
+CORRECTION (2026-09-15, same day, in response to a real user report):
+the FIRST version of this feature also overwrote TAIEX's `Volume` with
+FMTQIK's 成交股數 figure, reasoning (from yfinance's own GitHub issue
+tracker, ranaroussi/yfinance#2397) that Volume is documented-unreliable
+for INDEX tickers -- but that issue is specifically about `^NDX`
+(Nasdaq-100), a DIFFERENT ticker, and that assumption turned out not to
+hold for `^TWII`. The user compared this page's TAIEX Volume against
+Yahoo Finance's own `^TWII` page directly and found they no longer
+matched, and that the ORIGINAL (pre-FMTQIK) numbers had matched Yahoo
+Finance. Re-verified live from this sandbox (WebFetch, 2026-09-15):
+  - `finance.yahoo.com/quote/^TWII/history` shows real, non-zero daily
+    Volume in the low-millions range (e.g. 3,967,200 to 7,217,600 for
+    late Aug/early Sep 2026) -- yfinance's `.history()` Volume for
+    `^TWII` is NOT broken/all-zero after all.
+  - `tw.stock.yahoo.com`'s `^TWII` page independently shows a "總量"
+    figure in the same low-millions order of magnitude (8,705,759 on the
+    day checked) -- consistent with the finance.yahoo.com figure, not
+    with FMTQIK's number.
+  - FMTQIK's 成交股數 is a fundamentally DIFFERENT, much larger quantity:
+    the sum of shares traded across every individual stock listed on the
+    whole TWSE market that day (billions of shares) -- not "TAIEX's own
+    volume" the way Yahoo Finance/yfinance report it. These were never
+    the same metric; overwriting one with the other was the bug, not a
+    yfinance reliability problem.
+  - **Fix: Volume for BOTH TAIEX and TPEx now comes from yfinance only,
+    unmodified** (see `_rows_from_history()` below) -- matching what
+    Yahoo Finance's own site shows, which is the behavior the user
+    confirmed was correct before this feature touched Volume at all.
+    FMTQIK is used ONLY for TradeValue now (TAIEX only, as above) --
+    that figure has no yfinance equivalent at all, so there's no
+    competing "correct" number to conflict with, unlike Volume.
 """
 
 import os
@@ -194,13 +221,18 @@ def _months_with_turnover(existing_rows):
 
 
 def _fetch_taiex_turnover(existing_rows):
-    """Returns {iso_date: (shares, ntd_value)} for TAIEX's whole-TWSE-
-    market daily turnover, from TWSE's FMTQIK report (see module
-    docstring -- the only verified-live source for this project). Same
-    month-by-month incremental strategy as price_data.py's
-    fetch_ticker_prices: skip a month already covered by a real
-    TradeValue on file, except always re-fetch the most recent such
-    month (it may have been partial when last saved)."""
+    """Returns {iso_date: (shares, ntd_value)} for the whole TWSE market's
+    daily turnover, from TWSE's FMTQIK report (see module docstring --
+    the only verified-live source for this project). Only `ntd_value` is
+    actually used by callers now (as TAIEX's TradeValue) -- `shares` is
+    kept in the return tuple but deliberately NOT applied to TAIEX's
+    Volume (2026-09-15 CORRECTION: this is the whole-market total shares
+    traded, not the same quantity as TAIEX's own Volume reported by
+    Yahoo Finance/yfinance -- see module docstring). Same month-by-month
+    incremental strategy as price_data.py's fetch_ticker_prices: skip a
+    month already covered by a real TradeValue on file, except always
+    re-fetch the most recent such month (it may have been partial when
+    last saved)."""
     result = {}
     present_months = _months_with_turnover(existing_rows)
     target_months = _month_starts(PRICE_HISTORY_MONTHS)
@@ -245,11 +277,14 @@ def _rows_from_history(hist):
             "High": round(float(row["High"]), 4) if pd.notna(row.get("High")) else "",
             "Low": round(float(row["Low"]), 4) if pd.notna(row.get("Low")) else "",
             "Close": round(float(close), 4),
-            # Placeholder Volume from yfinance -- overwritten with TWSE's
-            # real 成交股數 for TAIEX in fetch_index() below (yfinance's
-            # own Volume is unreliable for an index ticker; see module
-            # docstring). Kept as-is for TPEx, which has no verified
-            # alternative source yet.
+            # Volume comes straight from yfinance for BOTH indices, kept
+            # as-is (NOT overwritten by FMTQIK -- see the module
+            # docstring's 2026-09-15 CORRECTION note: FMTQIK's 成交股數
+            # is the whole-TWSE-market total, a different and much
+            # larger number than what Yahoo Finance/yfinance report as
+            # `^TWII`'s own Volume; overwriting one with the other was a
+            # real bug, caught via a live comparison against Yahoo
+            # Finance's own site).
             "Volume": int(row["Volume"]) if pd.notna(row.get("Volume")) else "",
             # TradeValue has no yfinance equivalent at all -- filled in
             # for TAIEX only, in fetch_index() below; stays blank for
@@ -286,18 +321,26 @@ def fetch_index(code, yf_symbol, name_label):
     existing.update(new_rows)
 
     if code in TURNOVER_SOURCE_CODES:
+        # Only TradeValue is merged in from FMTQIK -- NOT Volume anymore
+        # (2026-09-15 CORRECTION, see module docstring): Volume stays
+        # whatever _rows_from_history() already set from yfinance, for
+        # both TAIEX and TPEx alike. `_fetch_taiex_turnover()` still
+        # returns a (shares, value) pair per day -- `shares` (FMTQIK's
+        # 成交股數, the whole-TWSE-market total) is deliberately unused
+        # here now; it's a different, much larger quantity than TAIEX's
+        # own Volume and was never a valid substitute for it.
         turnover = _fetch_taiex_turnover(existing)
         for iso, (shares, value) in turnover.items():
             if iso not in existing:
                 # FMTQIK reported a trading day yfinance's OHLC didn't --
                 # rare (the two sources should track the same trading
-                # calendar) but keep the turnover figures rather than
-                # silently dropping them; OHLC for this date is simply
-                # left blank until/unless a later yfinance fetch fills it.
+                # calendar) but keep the TradeValue figure rather than
+                # silently dropping it; OHLC/Volume for this date is
+                # simply left blank until/unless a later yfinance fetch
+                # fills them in.
                 existing[iso] = {"Date": iso, "Open": "", "High": "", "Low": "", "Close": "", "Volume": "", "TradeValue": ""}
-            existing[iso]["Volume"] = shares
             existing[iso]["TradeValue"] = value
-        print(f"  -> {len(turnover)} day(s) of TWSE 成交股數/成交金額 merged in (FMTQIK)")
+        print(f"  -> {len(turnover)} day(s) of TWSE 成交金額 merged in (FMTQIK)")
 
     if not existing:
         print("  -> no data returned")
