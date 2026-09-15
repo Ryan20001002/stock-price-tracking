@@ -474,6 +474,70 @@ def _roc_to_iso(roc_date):
     return f"{int(y) + 1911:04d}-{int(m):02d}-{int(d):02d}"
 
 
+def _tpex_index_date_to_iso(date_str):
+    """Parses TPEX_INDEX_HISTORY_URL's date field specifically -- CONFIRMED
+    LIVE (2026-09-15, "the data right now are merged in an incorrect way",
+    from the user's own CSV export showing rows dated e.g. "3937-09-15")
+    to NOT be ROC-formatted like every other TPEx/TWSE report this module
+    reads (st41, FMTQIK). It returns plain Gregorian y/m/d (e.g.
+    "2026/09/15"), not ROC "115/09/15" -- running it through _roc_to_iso
+    (+1911 on the year) produced exactly year+1911 (2026 -> 3937), which is
+    what confirmed the mismatch. This is actually GOOD news buried in a bug
+    report: it confirms the guessed inx_result.php URL/endpoint itself is
+    correct and returning real live TPEx OHLC data (values matched TPEx's
+    known ~380-410 range) -- only the date field's format assumption was
+    wrong.
+
+    This mis-parse cascaded into what looked like a merge bug: the OHLC
+    loop in _fetch_tpex_index_ohlc_and_volume() keyed its rows by the
+    garbage "3937-..." iso string, while the Volume loop (a few lines
+    later, reading the ALREADY-CONFIRMED-WORKING st41 report, still
+    correctly ROC-parsed) keyed its rows by the real "2026-..." iso string
+    -- so `month_lots.get(iso)` never found a match, and separately
+    fetch_tpex_trade_value() (a fully independent function/fetch) wrote
+    TradeValue under the real "2026-..." date. The result: real OHLC and
+    real TradeValue for the same actual trading day ended up split across
+    two different CSV rows under two different dates, never merging into
+    one -- exactly the "merged in an incorrect way" symptom reported.
+
+    Handles whichever format actually shows up, so this keeps working even
+    if TPEx changes it later: if the first segment already looks like a
+    plausible Gregorian year (>= 1911), use it as-is; otherwise treat it as
+    ROC and add 1911, same as _roc_to_iso."""
+    y, m, d = date_str.split("/")
+    y = int(y)
+    if y < 1911:
+        y += 1911
+    return f"{y:04d}-{int(m):02d}-{int(d):02d}"
+
+
+def _purge_garbage_date_rows(existing_rows):
+    """Strips any row whose Date is not a plausible real calendar date --
+    specifically the rows the TPEX_INDEX_HISTORY_URL date-format bug wrote
+    (see _tpex_index_date_to_iso's docstring above): dates like
+    "3937-09-15" (2026 + 1911) instead of "2026-09-15". Returns
+    (cleaned_rows, removed_count). fetch_tpex_index() writes the cleaned
+    rows back to disk immediately, even before re-fetching, so a garbage
+    row never lingers -- and removing it means the real month it belongs
+    to is no longer seen as "already covered" by _months_with_real_ohlc(),
+    so the corrected fetch re-requests it and the real date/row takes its
+    place."""
+    cleaned = {}
+    removed = 0
+    this_year = date.today().year
+    for iso, row in existing_rows.items():
+        try:
+            y = int(iso[:4])
+        except (ValueError, TypeError):
+            cleaned[iso] = row
+            continue
+        if y > this_year + 1:
+            removed += 1
+            continue
+        cleaned[iso] = row
+    return cleaned, removed
+
+
 def _num(s):
     """Parse a TWSE numeric field ('1,234.56', '--', '') into a float or
     None -- same idea as price_data.py's own _num."""
@@ -705,7 +769,13 @@ def _fetch_tpex_index_ohlc_and_volume(existing_rows):
             else:
                 for row in data:
                     try:
-                        iso = _roc_to_iso(row[0])
+                        # NOT _roc_to_iso -- this endpoint's date field is
+                        # plain Gregorian, not ROC, unlike every other
+                        # report this module reads. See
+                        # _tpex_index_date_to_iso's docstring for the full
+                        # story (found 2026-09-15 from a user-reported
+                        # "merged in an incorrect way" bug).
+                        iso = _tpex_index_date_to_iso(row[0])
                     except (ValueError, IndexError):
                         continue
                     c = _num(row[idx_close]) if idx_close < len(row) else None
@@ -758,6 +828,14 @@ def fetch_tpex_index():
     code = "TPEX"
     print(f"[market_index] {code} OHLC/Volume (TPEx 櫃買指數 月查詢 + st41, NOT yfinance)")
     existing = _load_existing(code)
+
+    existing, purged = _purge_garbage_date_rows(existing)
+    if purged:
+        print(f"  [!] removed {purged} row(s) with an impossible date (e.g. year 3937) -- these were "
+              f"written by the now-fixed TPEX_INDEX_HISTORY_URL date-format bug; the real date will "
+              f"be re-fetched below")
+        _write_csv(code, existing)
+
     fetched = _fetch_tpex_index_ohlc_and_volume(existing)
     if not fetched:
         print("  -> no OHLC data returned")
