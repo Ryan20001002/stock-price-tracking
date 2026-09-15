@@ -482,6 +482,37 @@ correction -- it still comes from FMTQIK (TAIEX only) and is still shown
 in 億元, since there's no competing yfinance figure to conflict with
 there.
 
+**RESTRUCTURED (2026-09-15, same day, still in response to the same
+user)**: after the CORRECTION above, the user reported the page was
+"still wrong" and asked explicitly to use the original code to fetch
+Volume and add a completely separate function for TradeValue. Two
+changes:
+
+- **Hard separation.** `fetch_index()` is back to exactly what it was
+  before this feature existed -- a plain OHLC+Volume fetch from
+  `yfinance`, with no FMTQIK/TradeValue logic inside it at all.
+  TradeValue is now fetched and written by its own function,
+  `fetch_taiex_trade_value()`, which only ever touches the `TradeValue`
+  field of rows already on file -- never Open/High/Low/Close/Volume.
+  `run()` calls both, one after the other.
+- **Historical data repair.** The CORRECTION fixed the code going
+  forward, but `fetch_index()`'s incremental strategy only ever
+  re-fetches from the latest date already on file -- it never revisits
+  older saved rows. Any date written while the *original* bug was live
+  (Volume overwritten with FMTQIK's whole-market figure, in the
+  billions) would stay wrong in the CSV forever even after the code fix
+  -- almost certainly why the page still looked wrong after the
+  CORRECTION alone. `fetch_index()` now scans the existing CSV on every
+  run and detects this: a Volume figure over 100,000,000 shares can only
+  ever have come from FMTQIK's whole-market total (real TAIEX/TPEx
+  Volume is in the low-to-mid millions, per the live Yahoo Finance
+  figures above). Any contaminated date found forces the fetch to start
+  from the *earliest* such date instead of the latest date on file, so
+  `yfinance` re-fetches and overwrites every contaminated row
+  automatically -- no manual CSV editing needed. **If your existing
+  `data/market_index/TAIEX.csv` has old rows with Volume in the billions,
+  the next `--market-index` run repairs them on its own.**
+
 ## Keeping data fresh
 
 Since this only fetches — it doesn't schedule itself — the simplest way to

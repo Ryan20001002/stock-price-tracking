@@ -108,6 +108,40 @@ Finance. Re-verified live from this sandbox (WebFetch, 2026-09-15):
     FMTQIK is used ONLY for TradeValue now (TAIEX only, as above) --
     that figure has no yfinance equivalent at all, so there's no
     competing "correct" number to conflict with, unlike Volume.
+
+RESTRUCTURED (2026-09-15, same day, still in response to the same user):
+after the CORRECTION above, the user reported the page was "still wrong"
+and asked explicitly to "use the original code to fetch the quantity of
+transaction, and add a new function to grab total value of transaction" --
+i.e. a harder separation than the CORRECTION made. Two things changed:
+
+  1. **Architecture**: `fetch_index()` is now back to exactly what it was
+     before the trading-value feature existed at all -- a plain OHLC+
+     Volume fetch from yfinance, with NO FMTQIK/TradeValue-awareness
+     inside it whatsoever (no `TURNOVER_SOURCE_CODES` branch, no merge
+     logic). TradeValue is now fetched and written by a completely
+     separate function, `fetch_taiex_trade_value()`, which only ever
+     touches the `TradeValue` field of rows already on file -- it never
+     writes Open/High/Low/Close/Volume. `run()` calls both, one after the
+     other; either can also be called/tested/debugged on its own.
+  2. **Historical data repair**: the CORRECTION fixed the code going
+     forward, but `fetch_index()`'s incremental strategy only ever
+     re-fetches from the latest date already on file onward -- it never
+     revisits older dates already saved. That means any row written while
+     the ORIGINAL bug was live (Volume overwritten with FMTQIK's
+     whole-market figure, in the billions) would stay wrong in the CSV
+     forever, even after the code fix -- which is almost certainly why the
+     page was "still wrong" after the CORRECTION: the bug was gone, but
+     the bad data it already wrote wasn't. `fetch_index()` now scans the
+     existing rows on every run and detects this: a Volume figure over
+     `VOLUME_CONTAMINATION_THRESHOLD` (100,000,000 shares) can only ever
+     have come from FMTQIK's whole-market total -- real TAIEX/TPEx Volume,
+     per every live Yahoo Finance figure checked in the CORRECTION, is in
+     the low-to-mid millions, nowhere near that. Any contaminated date
+     found forces `start` back to the EARLIEST such date instead of the
+     latest existing date, so yfinance re-fetches (and overwrites) every
+     contaminated row automatically, with no manual CSV surgery needed
+     from the user. See `_find_contaminated_dates()` below.
 """
 
 import os
@@ -131,6 +165,14 @@ TURNOVER_SOURCE_CODES = {"TAIEX"}
 FIELDNAMES = ["Date", "Open", "High", "Low", "Close", "Volume", "TradeValue"]
 
 FMTQIK_URL = "https://www.twse.com.tw/exchangeReport/FMTQIK"
+
+# A Volume figure above this can only ever have come from the ORIGINAL bug
+# (FMTQIK's whole-TWSE-market 成交股數 written into Volume) -- real TAIEX/
+# TPEx Volume from yfinance, per every live Yahoo Finance figure checked
+# during the 2026-09-15 CORRECTION, sits in the low-to-mid millions, orders
+# of magnitude below this. See module docstring's RESTRUCTURED note and
+# _find_contaminated_dates() below.
+VOLUME_CONTAMINATION_THRESHOLD = 100_000_000
 
 
 def _csv_path(code):
@@ -294,16 +336,50 @@ def _rows_from_history(hist):
     return rows
 
 
+def _find_contaminated_dates(existing_rows):
+    """Dates whose on-file Volume is implausibly large to be real TAIEX/
+    TPEx Volume -- i.e. it can only have been written by the ORIGINAL bug
+    (FMTQIK's whole-TWSE-market 成交股數 overwriting Volume, before the
+    2026-09-15 CORRECTION). Returns a list of iso date strings; empty if
+    nothing looks contaminated. See VOLUME_CONTAMINATION_THRESHOLD and the
+    module docstring's RESTRUCTURED note."""
+    bad = []
+    for iso, row in existing_rows.items():
+        vol = _num(row.get("Volume"))
+        if vol is not None and vol > VOLUME_CONTAMINATION_THRESHOLD:
+            bad.append(iso)
+    return bad
+
+
 def fetch_index(code, yf_symbol, name_label):
+    """Original-style fetch: plain OHLC + Volume from yfinance, nothing
+    else -- no FMTQIK, no TradeValue awareness at all (2026-09-15,
+    RESTRUCTURED back to this by explicit request after the CORRECTION's
+    merge-logic fix alone wasn't enough -- see module docstring).
+    TradeValue is handled entirely separately, by
+    fetch_taiex_trade_value() below."""
     print(f"[market_index] {code} {name_label} ({yf_symbol})")
     existing = _load_existing(code)
 
     if existing:
-        # Incremental: re-fetch starting from the latest date already on
-        # file (inclusive, to reconfirm a possibly-partial last day)
-        # through today -- same "always reconfirm the most recent point"
-        # idea price_data.py uses for its most recent month.
-        start = date.fromisoformat(max(existing.keys()))
+        contaminated = _find_contaminated_dates(existing)
+        if contaminated:
+            # Force a re-fetch starting from the EARLIEST contaminated
+            # date instead of the normal "latest date on file" -- this is
+            # what actually repairs old rows written by the pre-CORRECTION
+            # bug, since yfinance's returned rows overwrite whatever was
+            # there before (see existing.update(new_rows) below).
+            start = date.fromisoformat(min(contaminated))
+            print(f"  [!] {len(contaminated)} day(s) on file look contaminated by the old Volume bug "
+                  f"(Volume > {VOLUME_CONTAMINATION_THRESHOLD:,}, a scale that only ever came from FMTQIK's "
+                  f"whole-market figure) -- re-fetching from {start.isoformat()} onward to repair them")
+        else:
+            # Normal incremental case: re-fetch starting from the latest
+            # date already on file (inclusive, to reconfirm a possibly-
+            # partial last day) through today -- same "always reconfirm
+            # the most recent point" idea price_data.py uses for its most
+            # recent month.
+            start = date.fromisoformat(max(existing.keys()))
     else:
         start = date.today() - timedelta(days=PRICE_HISTORY_MONTHS * 31)
 
@@ -314,45 +390,54 @@ def fetch_index(code, yf_symbol, name_label):
         return
 
     new_rows = _rows_from_history(hist)
-    if not new_rows and code not in TURNOVER_SOURCE_CODES:
+    if not new_rows:
         print("  -> no data returned")
         return
 
     existing.update(new_rows)
+    _write_csv(code, existing)
+    print(f"  -> {len(existing)} trading days saved")
 
-    if code in TURNOVER_SOURCE_CODES:
-        # Only TradeValue is merged in from FMTQIK -- NOT Volume anymore
-        # (2026-09-15 CORRECTION, see module docstring): Volume stays
-        # whatever _rows_from_history() already set from yfinance, for
-        # both TAIEX and TPEx alike. `_fetch_taiex_turnover()` still
-        # returns a (shares, value) pair per day -- `shares` (FMTQIK's
-        # 成交股數, the whole-TWSE-market total) is deliberately unused
-        # here now; it's a different, much larger quantity than TAIEX's
-        # own Volume and was never a valid substitute for it.
-        turnover = _fetch_taiex_turnover(existing)
-        for iso, (shares, value) in turnover.items():
-            if iso not in existing:
-                # FMTQIK reported a trading day yfinance's OHLC didn't --
-                # rare (the two sources should track the same trading
-                # calendar) but keep the TradeValue figure rather than
-                # silently dropping it; OHLC/Volume for this date is
-                # simply left blank until/unless a later yfinance fetch
-                # fills them in.
-                existing[iso] = {"Date": iso, "Open": "", "High": "", "Low": "", "Close": "", "Volume": "", "TradeValue": ""}
-            existing[iso]["TradeValue"] = value
-        print(f"  -> {len(turnover)} day(s) of TWSE 成交金額 merged in (FMTQIK)")
 
-    if not existing:
+def fetch_taiex_trade_value():
+    """Separate, independent fetch for TAIEX's TradeValue (TWSE FMTQIK's
+    成交金額 -- see module docstring). Added 2026-09-15 as a hard split
+    from fetch_index(), by explicit request, so this function ONLY ever
+    reads and updates the `TradeValue` field of whatever rows are already
+    on file for TAIEX.csv -- it never touches Open/High/Low/Close/Volume,
+    and it isn't called for TPEx (no verified free whole-market source for
+    TPEx -- see docstring). Safe to run on its own, independent of
+    fetch_index()."""
+    code = "TAIEX"
+    print(f"[market_index] {code} trade value (TWSE FMTQIK)")
+    existing = _load_existing(code)
+    turnover = _fetch_taiex_turnover(existing)
+    if not turnover:
         print("  -> no data returned")
         return
 
+    for iso, (shares, value) in turnover.items():
+        # `shares` (FMTQIK's whole-TWSE-market 成交股數) is deliberately
+        # unused here -- it's a different, much larger quantity than
+        # TAIEX's own Volume (see module docstring) and was never a valid
+        # substitute for it; this function only ever writes `value`.
+        if iso not in existing:
+            # FMTQIK reported a trading day that isn't in TAIEX.csv yet --
+            # rare (the two sources should track the same trading
+            # calendar), but keep the TradeValue rather than dropping it;
+            # OHLC/Volume for this date stays blank until fetch_index()
+            # picks it up from yfinance on a later run.
+            existing[iso] = {"Date": iso, "Open": "", "High": "", "Low": "", "Close": "", "Volume": "", "TradeValue": ""}
+        existing[iso]["TradeValue"] = value
+
     _write_csv(code, existing)
-    print(f"  -> {len(existing)} trading days saved")
+    print(f"  -> {len(turnover)} day(s) of TWSE 成交金額 merged in (FMTQIK)")
 
 
 def run():
     for idx in INDEXES:
         fetch_index(idx["code"], idx["yf_symbol"], f'{idx["name"]} ({idx["name_en"]})')
+    fetch_taiex_trade_value()
 
 
 if __name__ == "__main__":
