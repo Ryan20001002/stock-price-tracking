@@ -10,7 +10,7 @@ train on.
 
 ```
 config.py               Watchlist + all settings (edit this, not the scripts below)
-main.py                 Orchestrator: python main.py [--prices] [--dividends] [--news] [--market-value] [--institutional]
+main.py                 Orchestrator: python main.py [--prices] [--dividends] [--news] [--market-value] [--institutional] [--market-index]
 app.py                   Streamlit webpage over everything below: streamlit run app.py
 
 twse_client.py           Shared rate-limited/retrying HTTP client
@@ -18,7 +18,8 @@ price_data.py             Daily OHLC price history (TWSE STOCK_DAY)
 dividend_data.py          Dividend payment history (yfinance)
 news_data.py               Recent headlines (Google News RSS)
 market_value_data.py    Shares outstanding + market value (opt-in; TWSE fund dataset + yfinance fallback)
-institutional_data.py  三大法人 (foreign/investment-trust/dealer) daily net buy-sell (opt-in; TWSE T86)
+institutional_data.py  三大法人 (foreign/investment-trust/dealer) daily net buy-sell (opt-in; FinMind)
+market_index_data.py  TAIEX + TPEx (OTC) index history (opt-in; yfinance -- see "Market indices" below)
 splits.py                     Stock-split detection/adjustment, used by predict_dividends.py
 
 predict_dividends.py     Next-payment prediction (two methods) -- also the shared, split-adjusted
@@ -35,6 +36,7 @@ data/                    All fetched/computed output (gitignored -- regenerate b
   shares/<code>.csv          Accumulated shares-outstanding snapshots per ticker
   market_value/<code>.csv   Daily market value per ticker (price x shares outstanding)
   institutional/<code>.csv  Daily 外資/投信/自營商 net buy-sell per ticker
+  market_index/<code>.csv  Daily OHLC for TAIEX/TPEX (see "Market indices" below)
 
 requirements.txt        pip install -r requirements.txt
 .gitignore
@@ -388,6 +390,40 @@ directly below the candlestick/volume charts on the **Prices** tab (not
 a separate tab) -- three bar charts (外資/投信/自營商 net buy-sell) for
 whichever ticker and date range you've already picked there, no second
 selector needed.
+
+## Market indices (TAIEX / TPEx)
+
+```
+python main.py --market-index
+```
+
+Fetches daily OHLC history for Taiwan's two headline market indices, via
+`yfinance`:
+
+- **TAIEX** -- the TWSE main-board weighted index (台股加權指數), Yahoo
+  Finance symbol `^TWII`.
+- **TPEx** -- the Taipei Exchange composite index (櫃買指數), Taiwan's
+  over-the-counter "second board" alongside the TWSE-listed market
+  everything else in this project tracks, Yahoo Finance symbol `^TWOII`.
+
+Added 2026-09-15, by request ("add a page to store TAIEX and TSEA").
+"TSEA" isn't a real ticker or index name -- a clarifying question
+confirmed the TPEx/OTC index above is what was meant, so that's what's
+implemented; the code (`market_index_data.py`) keeps "TSEA" as a comment
+only, in case that name comes up again.
+
+Unlike every other fetch script in this project, these two aren't
+per-WATCHLIST-ticker data -- they're market-wide index values, so they
+don't depend on (or show up in) your personal watchlist at all. Output
+is saved to `data/market_index/TAIEX.csv` and `data/market_index/TPEX.csv`,
+and shown in the app's own "大盤指數" tab (a dropdown to pick which
+index, the same quick-range chart/table as the 股價 tab uses per-ticker).
+Like `--market-value` and `--institutional`, this is opt-in for now, not
+part of the default `python main.py` run -- see `market_index_data.py`'s
+own docstring for why (it's new, and untested against a live Yahoo
+Finance response from the environment it was built in -- built and unit-
+tested against a mocked response instead; run it once and check the
+output before relying on it).
 
 ## Keeping data fresh
 

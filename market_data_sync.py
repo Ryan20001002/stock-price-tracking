@@ -1,9 +1,9 @@
 """
 Pushes/pulls the fetched market-data CSVs (data/prices, data/dividends,
-data/institutional, data/market_value, data/news) to/from the same
-private GitHub repo already used for accounts (user_store.py) and the
-shared ticker registry (config.py) -- see github_json_store.py, which
-all three of these modules share.
+data/institutional, data/market_value, data/news, data/market_index) to/
+from the same private GitHub repo already used for accounts
+(user_store.py) and the shared ticker registry (config.py) -- see
+github_json_store.py, which all three of these modules share.
 
 Why this exists (2026-09-11): every fetch script (price_data.py,
 dividend_data.py, institutional_data.py, market_value_data.py,
@@ -60,8 +60,9 @@ import github_json_store
 
 # Every local data/<category>/ folder a fetch script writes CSVs into.
 # Keep this in sync with price_data.py/dividend_data.py/institutional_data.py/
-# market_value_data.py/news_data.py's own _csv_path()-style helpers.
-CATEGORIES = ["prices", "dividends", "institutional", "market_value", "news"]
+# market_value_data.py/news_data.py/market_index_data.py's own
+# _csv_path()-style helpers.
+CATEGORIES = ["prices", "dividends", "institutional", "market_value", "news", "market_index"]
 
 
 def _github_config():

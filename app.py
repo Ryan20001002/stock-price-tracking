@@ -76,6 +76,7 @@ import price_data
 import dividend_data
 import news_data
 import market_value_data
+import market_index_data
 import predict_dividends
 import returns
 import ddm_valuation
@@ -341,6 +342,14 @@ MARKET_VALUE_COLUMNS_ZH = {
     "MarketValue": "市值（新台幣）",
 }
 
+# market_index_data.py's per-index CSVs (TAIEX/TPEx) -- no Change/TradeValue/
+# Transactions columns (unlike PRICE_COLUMNS_ZH's per-ticker files above),
+# since yfinance's .history() doesn't return those for an index.
+MARKET_INDEX_COLUMNS_ZH = {
+    "Date": "日期", "Open": "開盤", "High": "最高", "Low": "最低",
+    "Close": "收盤", "Volume": "成交量",
+}
+
 INSTITUTIONAL_COLUMNS_ZH = {
     "Date": "日期", "ForeignNet": "外資淨買賣超（股）",
     "InvestmentTrustNet": "投信淨買賣超（股）", "DealerNet": "自營商淨買賣超（股）",
@@ -462,6 +471,49 @@ def render_bar(df, column, label, color="#4c78a8"):
         autosize=True,
     )
     st.plotly_chart(fig, use_container_width=True, config=_MOBILE_CHART_CONFIG)
+
+
+# Quick date-range presets (in days, counting back from the latest date on
+# file) shared by the 股價 tab (per-ticker prices) and the 大盤指數 tab
+# (TAIEX/TPEx) -- hoisted to module level (2026-09-15, when the 大盤指數 tab
+# was added) so both share one definition instead of two copies that could
+# silently drift apart.
+RANGE_PRESET_DAYS = {
+    "1週": 7, "1個月": 30, "3個月": 91, "6個月": 182,
+    "1年": 365, "3年": 365 * 3,
+}
+
+
+def pick_date_range(min_date, max_date, key_prefix):
+    """Renders the 「顯示區間」 radio (quick presets, "全部", or "自訂..." with
+    its own start/end date inputs) and returns the chosen (start_date,
+    end_date). `key_prefix` must be unique per widget instance (e.g. include
+    the picked ticker/index code) so switching what's selected in a dropdown
+    above doesn't carry one instance's chosen range into another's."""
+    range_options = list(RANGE_PRESET_DAYS) + ["全部", "自訂..."]
+    range_choice = st.radio(
+        "顯示區間", range_options, index=range_options.index("全部"),
+        horizontal=True, key=f"{key_prefix}_range",
+    )
+    if range_choice == "自訂...":
+        col_start, col_end = st.columns(2)
+        start_date = col_start.date_input(
+            "起始日期", value=min_date, min_value=min_date, max_value=max_date,
+            key=f"{key_prefix}_start",
+        )
+        end_date = col_end.date_input(
+            "結束日期", value=max_date, min_value=min_date, max_value=max_date,
+            key=f"{key_prefix}_end",
+        )
+        if start_date > end_date:
+            st.warning("起始日期不能晚於結束日期，已自動交換兩者。")
+            start_date, end_date = end_date, start_date
+    elif range_choice == "全部":
+        start_date, end_date = min_date, max_date
+    else:
+        end_date = max_date
+        start_date = max(min_date, max_date - pd.Timedelta(days=RANGE_PRESET_DAYS[range_choice]))
+    return start_date, end_date
 
 
 # --- "Remember me" persistent login (2026-09-10) -----------------------------
@@ -866,6 +918,7 @@ if st.sidebar.button("🔄 一鍵抓取全部資料", use_container_width=True, 
     ])
     run_and_log("抓取流通股數／市值 (market_value_data.py)", market_value_data.run, sync_category="market_value")
     run_and_log("抓取三大法人買賣超 (institutional_data.py)", institutional_data.run, sync_category="institutional")
+    run_and_log("抓取大盤指數 (market_index_data.py)", market_index_data.run, sync_category="market_index")
     st.sidebar.success("全部資料抓取完成！")
 
 st.sidebar.caption("或者只更新其中一項：")
@@ -879,6 +932,8 @@ if st.sidebar.button("抓取流通股數／市值", use_container_width=True):
     run_and_log("抓取流通股數／市值 (market_value_data.py)", market_value_data.run, sync_category="market_value")
 if st.sidebar.button("抓取三大法人買賣超", use_container_width=True):
     run_and_log("抓取三大法人買賣超 (institutional_data.py)", institutional_data.run, sync_category="institutional")
+if st.sidebar.button("抓取大盤指數（TAIEX／櫃買指數）", use_container_width=True):
+    run_and_log("抓取大盤指數 (market_index_data.py)", market_index_data.run, sync_category="market_index")
 
 st.sidebar.divider()
 st.sidebar.caption("以下兩個按鈕只會重新計算已存在的本機資料，速度快，不會連線網路。")
@@ -907,8 +962,8 @@ if not my_watchlist:
 else:
     st.caption("我的追蹤清單：" + "、".join(f"{s['code']} {s['name']}" for s in my_watchlist))
 
-tab_overview, tab_prices, tab_dividends, tab_market_value, tab_ddm, tab_news = st.tabs(
-    ["總覽", "股價", "股利", "市值", "DDM 估值", "新聞"]
+tab_overview, tab_market_index, tab_prices, tab_dividends, tab_market_value, tab_ddm, tab_news = st.tabs(
+    ["總覽", "大盤指數", "股價", "股利", "市值", "DDM 估值", "新聞"]
 )
 
 # --- Overview ------------------------------------------------------------------
@@ -935,6 +990,64 @@ with tab_overview:
                     st.metric("市值（新台幣）", f"{latest_mv['MarketValue']:,.0f}")
         st.info("第一次使用請從側邊欄抓取資料，之後也可以用來更新資料。", icon="ℹ️")
 
+# --- Market indices (TAIEX / TPEx) -----------------------------------------------
+# Added 2026-09-15, by explicit request. Deliberately NOT gated on
+# `my_watchlist` (unlike every tab below) -- these are market-WIDE index
+# values, not per-account watchlist data, so they're worth showing even to
+# a brand-new account/guest that hasn't added any tickers yet.
+
+with tab_market_index:
+    st.caption(
+        "台灣大盤指數 -- 不受你的追蹤清單影響，固定顯示以下兩個指數；"
+        "資料來源為 yfinance（Yahoo Finance），第一次使用請在側邊欄點擊"
+        "「抓取大盤指數（TAIEX／櫃買指數）」。"
+    )
+    idx_codes = [i["code"] for i in market_index_data.INDEXES]
+    idx_names = {i["code"]: i["name"] for i in market_index_data.INDEXES}
+    picked_idx = st.selectbox(
+        "選擇指數", idx_codes, format_func=lambda c: f"{c} {idx_names[c]}", key="market_index_picker",
+    )
+    idx_data = load_csv(os.path.join(config.DATA_DIR, "market_index", f"{picked_idx}.csv"))
+    if idx_data is None:
+        st.info("尚無大盤指數資料 -- 請在側邊欄點擊「抓取大盤指數（TAIEX／櫃買指數）」。")
+    else:
+        idx_data["Date"] = pd.to_datetime(idx_data["Date"])
+        idx_data = idx_data.sort_values("Date")
+
+        latest = idx_data.iloc[-1]
+        prev = idx_data.iloc[-2] if len(idx_data) > 1 else None
+        change = (latest["Close"] - prev["Close"]) if prev is not None else None
+        pct = (change / prev["Close"] * 100) if prev is not None and prev["Close"] else None
+        st.metric(
+            f"{picked_idx} {idx_names[picked_idx]} 最新收盤",
+            f"{latest['Close']:.2f}",
+            delta=f"{change:+.2f} ({pct:+.2f}%)" if change is not None and pct is not None else None,
+            help=f"資料日期：{latest['Date'].date()}",
+        )
+
+        min_date = idx_data["Date"].min().date()
+        max_date = idx_data["Date"].max().date()
+        start_date, end_date = pick_date_range(min_date, max_date, key_prefix=f"index_{picked_idx}")
+
+        filtered = idx_data[(idx_data["Date"].dt.date >= start_date) & (idx_data["Date"].dt.date <= end_date)]
+        if filtered.empty:
+            st.info("這個區間內沒有資料，請試試其他區間。")
+        else:
+            render_candlestick(filtered)
+            st.caption("成交量")
+            render_bar(filtered, "Volume", "成交量")
+            st.dataframe(
+                display_table(filtered.sort_values("Date", ascending=False), labels=MARKET_INDEX_COLUMNS_ZH),
+                use_container_width=True, hide_index=True,
+            )
+    st.caption(
+        "TAIEX＝台股加權指數（上市大盤，^TWII）；櫃買指數＝TPEx（Taipei "
+        "Exchange，原上櫃／OTC市場，^TWOII），這是台灣「上市」以外的"
+        "「上櫃」市場整體表現，跟個股／ETF頁面看到的價格是不同的統計"
+        "範圍。兩者都是市場整體指標，不屬於任何個股，因此不會出現在"
+        "「我的追蹤清單」裡，也不需要先加入清單才看得到。"
+    )
+
 # --- Prices ----------------------------------------------------------------------
 
 with tab_prices:
@@ -952,38 +1065,10 @@ with tab_prices:
             min_date = prices["Date"].min().date()
             max_date = prices["Date"].max().date()
 
-            # Quick presets (in days, counting back from the latest date on
-            # file) plus a custom start/end option. Keyed per-ticker so
-            # switching between stocks in the dropdown above doesn't carry
-            # one ticker's chosen range over to another's widget state.
-            RANGE_PRESET_DAYS = {
-                "1週": 7, "1個月": 30, "3個月": 91, "6個月": 182,
-                "1年": 365, "3年": 365 * 3,
-            }
-            range_options = list(RANGE_PRESET_DAYS) + ["全部", "自訂..."]
-            range_choice = st.radio(
-                "顯示區間", range_options, index=range_options.index("全部"),
-                horizontal=True, key=f"price_range_{picked}",
-            )
-
-            if range_choice == "自訂...":
-                col_start, col_end = st.columns(2)
-                start_date = col_start.date_input(
-                    "起始日期", value=min_date, min_value=min_date, max_value=max_date,
-                    key=f"price_start_{picked}",
-                )
-                end_date = col_end.date_input(
-                    "結束日期", value=max_date, min_value=min_date, max_value=max_date,
-                    key=f"price_end_{picked}",
-                )
-                if start_date > end_date:
-                    st.warning("起始日期不能晚於結束日期，已自動交換兩者。")
-                    start_date, end_date = end_date, start_date
-            elif range_choice == "全部":
-                start_date, end_date = min_date, max_date
-            else:
-                end_date = max_date
-                start_date = max(min_date, max_date - pd.Timedelta(days=RANGE_PRESET_DAYS[range_choice]))
+            # Keyed per-ticker (key_prefix includes `picked`) so switching
+            # between stocks in the dropdown above doesn't carry one
+            # ticker's chosen range over to another's widget state.
+            start_date, end_date = pick_date_range(min_date, max_date, key_prefix=f"price_{picked}")
 
             filtered = prices[(prices["Date"].dt.date >= start_date) & (prices["Date"].dt.date <= end_date)]
             if filtered.empty:

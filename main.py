@@ -9,6 +9,7 @@ Usage:
     python main.py --news           # only news headlines
     python main.py --market-value   # shares outstanding + market value (opt-in, see below)
     python main.py --institutional  # 三大法人 net buy/sell history (opt-in, see below)
+    python main.py --market-index   # TAIEX + TPEx index history (opt-in, see below)
 (flags can be combined, e.g. `python main.py --prices --dividends`)
 
 --market-value is NOT part of the default "run everything" pass yet --
@@ -27,6 +28,13 @@ for a typical watchlist is fast enough to no longer need special
 handling (see institutional_data.py's/finmind_client.py's docstrings for
 the full story). Run it explicitly, or use the separate button in the
 app sidebar, same as before.
+
+--market-index is likewise opt-in (2026-09-15) -- it's brand new,
+market-WIDE rather than per-WATCHLIST-ticker (fetches TAIEX + the TPEx/
+OTC index via yfinance, see market_index_data.py), and hasn't been
+confirmed against live data from the environment it was built in (no
+network path to Yahoo Finance there -- see that module's docstring).
+Run it explicitly and check the output before relying on it.
 
 Speed: whenever more than one of prices/dividends/news is being fetched,
 they now run CONCURRENTLY (in separate threads) instead of one after
@@ -70,6 +78,7 @@ import dividend_data
 import news_data
 import market_value_data
 import institutional_data
+import market_index_data
 import market_data_sync
 import github_json_store
 
@@ -115,6 +124,8 @@ def main():
                          help="fetch shares outstanding and compute daily market value (opt-in, see module docstring)")
     parser.add_argument("--institutional", action="store_true",
                          help="fetch 三大法人 (foreign/investment-trust/dealer) net buy-sell history (opt-in, see module docstring)")
+    parser.add_argument("--market-index", action="store_true",
+                         help="fetch TAIEX + TPEx (OTC) index history (opt-in, see module docstring)")
     parser.add_argument("--sequential", action="store_true",
                          help="fetch prices/dividends/news one at a time instead of concurrently "
                               "(slower, but keeps console output from interleaving -- handy for debugging)")
@@ -127,8 +138,10 @@ def main():
     args = parser.parse_args()
 
     # If no specific flag is given, run the three established fetchers --
-    # --market-value and --institutional are opt-in only (see docstring above).
-    run_all = not (args.prices or args.dividends or args.news or args.market_value or args.institutional)
+    # --market-value, --institutional, and --market-index are opt-in only
+    # (see docstring above).
+    run_all = not (args.prices or args.dividends or args.news or args.market_value
+                   or args.institutional or args.market_index)
 
     jobs = []
     if run_all or args.prices:
@@ -165,6 +178,11 @@ def main():
         print("\n=== 三大法人買賣超 (institutional net buy/sell) ===")
         institutional_data.run()
         _push("institutional")
+
+    if args.market_index:
+        print("\n=== TAIEX + TPEx index history ===")
+        market_index_data.run()
+        _push("market_index")
 
     print("\nDone. Data saved under ./data/")
 
