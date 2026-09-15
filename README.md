@@ -436,8 +436,8 @@ based on). So the two columns are sourced differently per index, and
 that's surfaced honestly rather than papered over:
 
 - **TAIEX** -- Volume (成交量, unit: 股/shares) and TradeValue (成交金額,
-  unit: 元/NT dollars) both come from TWSE's own free, no-API-key FMTQIK
-  report (the whole-market daily summary), overwriting yfinance's
+  stored unit: 元/NT dollars) both come from TWSE's own free, no-API-key
+  FMTQIK report (the whole-market daily summary), overwriting yfinance's
   unreliable Volume figure. This is real, verified-live official exchange
   data.
 - **TPEx** -- no free whole-market turnover source could be found (TPEx's
@@ -450,11 +450,39 @@ that's surfaced honestly rather than papered over:
   comes from `yfinance` as before, with the same index-ticker reliability
   caveat as always.
 
-Both `PRICE_COLUMNS_ZH` (股價 tab, per-ticker) and `MARKET_INDEX_COLUMNS_ZH`
-(大盤指數 tab) now label Volume/TradeValue with their units (成交量（股）／
-成交金額（元）) on screen -- the underlying CSV column names themselves are
-unchanged (`Volume`, `TradeValue`), so nothing that reads those CSVs
-elsewhere in this project needed updating.
+`PRICE_COLUMNS_ZH` (股價 tab, per-ticker) labels Volume/TradeValue with
+their units on screen (成交量（股）／成交金額（元）) -- the underlying CSV
+column names themselves are unchanged (`Volume`, `TradeValue`), so nothing
+that reads those CSVs elsewhere in this project needed updating.
+
+**Trading quantity/value display units (2026-09-15, two same-day follow-up
+requests on the 大盤指數 tab)**:
+
+- **"the quantity might be incorrect"** -- raised without specifics, so
+  clarified via AskUserQuestion before changing anything (guessing at a
+  data-accuracy fix on a vague report risks fixing the wrong thing). The
+  answer: TAIEX's raw share-count Volume (billions of shares) is
+  technically correct but unfamiliar to read as a bare number. Fixed by
+  displaying it in **張** (board lots of 1,000 shares -- the standard
+  trading unit Taiwan quotes volume in), not by changing the underlying
+  data.
+- **"transform the unit of total value of transaction into 100 million
+  dollars"**: TradeValue shown in **億元** (1億＝100,000,000 元), the
+  standard unit Taiwanese financial media reports whole-market trading
+  value in (a 12-digit raw NT-dollar figure is otherwise unreadable at a
+  glance).
+
+Both are **display-only** conversions in `app.py` -- `data/market_index/
+<code>.csv` on disk keeps storing the raw share count / NT-dollar amount,
+same as every other figure in this project's CSVs, so nothing downstream
+of the CSV needed to change. `MARKET_INDEX_COLUMNS_ZH`'s labels read
+成交量（張）／成交金額（億元） accordingly; TPEx's Volume (still yfinance-
+sourced) gets the same 張 conversion, but its TradeValue stays blank as
+before (nothing to convert). The 股價 tab's per-ticker Volume/TradeValue
+are unchanged (still 股／元) -- individual stocks' daily figures are
+often small enough that 張／億元 would read awkwardly (e.g. a low-volume
+stock's TradeValue as "0.02億元"); happy to extend the same conversions
+there too if useful.
 
 ## Keeping data fresh
 

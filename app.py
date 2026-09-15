@@ -344,16 +344,22 @@ MARKET_VALUE_COLUMNS_ZH = {
 
 # market_index_data.py's per-index CSVs (TAIEX/TPEx). Added 2026-09-15 by
 # explicit request ("add a column to store total value of transactions, and
-# add the unit for the trading quantity"): TradeValue (成交金額, unit 元/NT
-# dollars) is TAIEX-only, sourced from TWSE's FMTQIK whole-market report --
-# it's genuinely blank for TPEx (no verified free whole-market source found;
-# see market_index_data.py's module docstring), not zero/fabricated. Volume
-# (成交量, unit 股/shares) for TAIEX also now comes from FMTQIK; for TPEx it
-# still comes from yfinance, which is unreliable for index tickers -- the
-# tab's caption below spells this asymmetry out so it isn't silently hidden.
+# add the unit for the trading quantity"): TradeValue (成交金額) is TAIEX-only,
+# sourced from TWSE's FMTQIK whole-market report -- it's genuinely blank for
+# TPEx (no verified free whole-market source found; see market_index_data.py's
+# module docstring), not zero/fabricated. Volume (成交量) for TAIEX also now
+# comes from FMTQIK; for TPEx it still comes from yfinance, which is
+# unreliable for index tickers -- the tab's caption below spells this
+# asymmetry out so it isn't silently hidden.
+# Labels say 張/億元 (not 股/元) because the tab_market_index block above
+# scales the displayed values (Volume /1000, TradeValue /1e8) before
+# rendering (2026-09-15 follow-up requests: "the quantity might be
+# incorrect" -> clarified as Volume's raw share count being unfamiliar, and
+# "transform the unit of total value of transaction into 100 million
+# dollars") -- the on-disk CSV itself is still in raw shares/NT dollars.
 MARKET_INDEX_COLUMNS_ZH = {
     "Date": "日期", "Open": "開盤", "High": "最高", "Low": "最低",
-    "Close": "收盤", "Volume": "成交量（股）", "TradeValue": "成交金額（元）",
+    "Close": "收盤", "Volume": "成交量（張）", "TradeValue": "成交金額（億元）",
 }
 
 INSTITUTIONAL_COLUMNS_ZH = {
@@ -1039,19 +1045,41 @@ with tab_market_index:
         if filtered.empty:
             st.info("這個區間內沒有資料，請試試其他區間。")
         else:
+            # Display-only unit conversions (2026-09-15, two follow-up
+            # requests): "the quantity might be incorrect" -- clarified via
+            # AskUserQuestion that this meant Volume's raw share count being
+            # huge/unfamiliar, not an actual data bug -- fixed by showing it
+            # in 張 (board lots of 1,000 shares, the standard trading-unit
+            # Taiwan volume is normally quoted in), and "transform the unit
+            # of total value of transaction into 100 million dollars" --
+            # TradeValue shown in 億元 (1億 = 100,000,000), the standard unit
+            # Taiwanese financial media reports trading value in. Both are
+            # display-only: the on-disk CSV (market_index_data.py's
+            # data/market_index/<code>.csv) keeps storing the raw share
+            # count / NT-dollar amount, same as every other figure in this
+            # project's CSVs -- nothing downstream that reads that file
+            # (this tab included, on its next load) needs the scaled
+            # version, so scaling only at render time avoids two different
+            # on-disk conventions for the same column.
+            filtered_display = filtered.copy()
+            filtered_display["Volume"] = filtered_display["Volume"] / 1000
+            has_trade_value = "TradeValue" in filtered.columns and filtered["TradeValue"].notna().any()
+            if has_trade_value:
+                filtered_display["TradeValue"] = filtered_display["TradeValue"] / 1e8
+
             render_candlestick(filtered)
-            st.caption("成交量（股）")
-            render_bar(filtered, "Volume", "成交量")
+            st.caption("成交量（張）")
+            render_bar(filtered_display, "Volume", "成交量")
             # TradeValue is TAIEX-only (see MARKET_INDEX_COLUMNS_ZH's comment
             # above) -- TPEx's column is genuinely blank, not zero, so only
             # draw this chart when there's at least one real value to show;
             # otherwise an all-NaN bar chart would just be a confusing blank
             # box under a "成交金額" heading.
-            if "TradeValue" in filtered.columns and filtered["TradeValue"].notna().any():
-                st.caption("成交金額（元）")
-                render_bar(filtered, "TradeValue", "成交金額", color="#e0a458")
+            if has_trade_value:
+                st.caption("成交金額（億元）")
+                render_bar(filtered_display, "TradeValue", "成交金額", color="#e0a458")
             st.dataframe(
-                display_table(filtered.sort_values("Date", ascending=False), labels=MARKET_INDEX_COLUMNS_ZH),
+                display_table(filtered_display.sort_values("Date", ascending=False), labels=MARKET_INDEX_COLUMNS_ZH),
                 use_container_width=True, hide_index=True,
             )
     st.caption(
@@ -1064,11 +1092,12 @@ with tab_market_index:
     st.caption(
         "成交量／成交金額說明：TAIEX（上市大盤）的成交量與成交金額來自"
         "證交所官方「每日市場成交資訊」報表，為上市市場整體的真實統計"
-        "數字（單位：成交量＝股，成交金額＝元）。櫃買指數（TPEx）目前"
-        "找不到可免費取得的整體市場成交金額資料來源，因此該欄位保持"
-        "空白，不會用估計或捏造的數字填入；其成交量欄位仍沿用 yfinance"
-        "資料，但 yfinance 對「指數」（而非個股）的成交量本來就不太"
-        "可靠，僅供參考。"
+        "數字（成交量顯示單位：張，1張＝1,000股；成交金額顯示單位：億元，"
+        "1億元＝100,000,000元；資料庫內仍以原始股數／元為單位儲存）。"
+        "櫃買指數（TPEx）目前找不到可免費取得的整體市場成交金額資料來源，"
+        "因此該欄位保持空白，不會用估計或捏造的數字填入；其成交量欄位"
+        "仍沿用 yfinance 資料（僅單位換算為張），但 yfinance 對「指數」"
+        "（而非個股）的成交量本來就不太可靠，僅供參考。"
     )
 
 # --- Prices ----------------------------------------------------------------------
