@@ -425,6 +425,37 @@ Finance response from the environment it was built in -- built and unit-
 tested against a mocked response instead; run it once and check the
 output before relying on it).
 
+**Trading volume / trading value** (added 2026-09-15, by request -- "add a
+column to store total value of transactions, and add the unit for the
+trading quantity"). `yfinance` has no trading-value (turnover, in NT
+dollars) field at all for any ticker, and its Volume field is documented
+as unreliable specifically for index tickers like these two (an index
+itself isn't "traded" -- only its constituent stocks are; see
+`market_index_data.py`'s docstring for the upstream yfinance issue this is
+based on). So the two columns are sourced differently per index, and
+that's surfaced honestly rather than papered over:
+
+- **TAIEX** -- Volume (成交量, unit: 股/shares) and TradeValue (成交金額,
+  unit: 元/NT dollars) both come from TWSE's own free, no-API-key FMTQIK
+  report (the whole-market daily summary), overwriting yfinance's
+  unreliable Volume figure. This is real, verified-live official exchange
+  data.
+- **TPEx** -- no free whole-market turnover source could be found (TPEx's
+  own site blocks every deeper path from this project's build
+  environment, and the one TPEx OpenAPI endpoint found is per-stock, not
+  a whole-market total). TradeValue is left genuinely **blank** for TPEx
+  rather than estimated or fabricated -- the app's 大盤指數 tab explains
+  this gap in its own caption, and skips drawing an empty TradeValue chart
+  for TPEx rather than showing a misleading blank one. TPEx's Volume still
+  comes from `yfinance` as before, with the same index-ticker reliability
+  caveat as always.
+
+Both `PRICE_COLUMNS_ZH` (股價 tab, per-ticker) and `MARKET_INDEX_COLUMNS_ZH`
+(大盤指數 tab) now label Volume/TradeValue with their units (成交量（股）／
+成交金額（元）) on screen -- the underlying CSV column names themselves are
+unchanged (`Volume`, `TradeValue`), so nothing that reads those CSVs
+elsewhere in this project needed updating.
+
 ## Keeping data fresh
 
 Since this only fetches — it doesn't schedule itself — the simplest way to

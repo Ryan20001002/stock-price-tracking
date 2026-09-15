@@ -289,8 +289,8 @@ def load_csv(path):
 
 PRICE_COLUMNS_ZH = {
     "Date": "日期", "Open": "開盤價", "High": "最高價", "Low": "最低價",
-    "Close": "收盤價", "Change": "漲跌", "Volume": "成交量",
-    "TradeValue": "成交金額", "Transactions": "成交筆數",
+    "Close": "收盤價", "Change": "漲跌", "Volume": "成交量（股）",
+    "TradeValue": "成交金額（元）", "Transactions": "成交筆數",
 }
 
 DIVIDEND_COLUMNS_ZH = {
@@ -342,12 +342,18 @@ MARKET_VALUE_COLUMNS_ZH = {
     "MarketValue": "市值（新台幣）",
 }
 
-# market_index_data.py's per-index CSVs (TAIEX/TPEx) -- no Change/TradeValue/
-# Transactions columns (unlike PRICE_COLUMNS_ZH's per-ticker files above),
-# since yfinance's .history() doesn't return those for an index.
+# market_index_data.py's per-index CSVs (TAIEX/TPEx). Added 2026-09-15 by
+# explicit request ("add a column to store total value of transactions, and
+# add the unit for the trading quantity"): TradeValue (成交金額, unit 元/NT
+# dollars) is TAIEX-only, sourced from TWSE's FMTQIK whole-market report --
+# it's genuinely blank for TPEx (no verified free whole-market source found;
+# see market_index_data.py's module docstring), not zero/fabricated. Volume
+# (成交量, unit 股/shares) for TAIEX also now comes from FMTQIK; for TPEx it
+# still comes from yfinance, which is unreliable for index tickers -- the
+# tab's caption below spells this asymmetry out so it isn't silently hidden.
 MARKET_INDEX_COLUMNS_ZH = {
     "Date": "日期", "Open": "開盤", "High": "最高", "Low": "最低",
-    "Close": "收盤", "Volume": "成交量",
+    "Close": "收盤", "Volume": "成交量（股）", "TradeValue": "成交金額（元）",
 }
 
 INSTITUTIONAL_COLUMNS_ZH = {
@@ -1034,8 +1040,16 @@ with tab_market_index:
             st.info("這個區間內沒有資料，請試試其他區間。")
         else:
             render_candlestick(filtered)
-            st.caption("成交量")
+            st.caption("成交量（股）")
             render_bar(filtered, "Volume", "成交量")
+            # TradeValue is TAIEX-only (see MARKET_INDEX_COLUMNS_ZH's comment
+            # above) -- TPEx's column is genuinely blank, not zero, so only
+            # draw this chart when there's at least one real value to show;
+            # otherwise an all-NaN bar chart would just be a confusing blank
+            # box under a "成交金額" heading.
+            if "TradeValue" in filtered.columns and filtered["TradeValue"].notna().any():
+                st.caption("成交金額（元）")
+                render_bar(filtered, "TradeValue", "成交金額", color="#e0a458")
             st.dataframe(
                 display_table(filtered.sort_values("Date", ascending=False), labels=MARKET_INDEX_COLUMNS_ZH),
                 use_container_width=True, hide_index=True,
@@ -1046,6 +1060,15 @@ with tab_market_index:
         "「上櫃」市場整體表現，跟個股／ETF頁面看到的價格是不同的統計"
         "範圍。兩者都是市場整體指標，不屬於任何個股，因此不會出現在"
         "「我的追蹤清單」裡，也不需要先加入清單才看得到。"
+    )
+    st.caption(
+        "成交量／成交金額說明：TAIEX（上市大盤）的成交量與成交金額來自"
+        "證交所官方「每日市場成交資訊」報表，為上市市場整體的真實統計"
+        "數字（單位：成交量＝股，成交金額＝元）。櫃買指數（TPEx）目前"
+        "找不到可免費取得的整體市場成交金額資料來源，因此該欄位保持"
+        "空白，不會用估計或捏造的數字填入；其成交量欄位仍沿用 yfinance"
+        "資料，但 yfinance 對「指數」（而非個股）的成交量本來就不太"
+        "可靠，僅供參考。"
     )
 
 # --- Prices ----------------------------------------------------------------------
