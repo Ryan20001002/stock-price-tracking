@@ -299,6 +299,71 @@ that never self-heals even if the underlying data source is fine:
   if `^TWOII` is genuinely broken on Yahoo's side, this will now show a
   real per-run error message; if it isn't (this code bug was the whole
   story), the gap should now backfill on the very next run.
+
+**THIRD pass (2026-09-15, same day, immediate follow-up -- user reported
+the gap STILL wasn't closing after the second fix, and explicitly asked to
+"change a method to fix this part")**: with both a visibility fix and a
+real logic bug already fixed and still no OHLC for TPEx, the most likely
+remaining explanation is the one flagged as a risk from the very start of
+this module (see the CAVEAT section at the top): `^TWOII` itself may
+genuinely no longer return usable data through yfinance's underlying Yahoo
+Finance API, regardless of anything this module's own code does. The user
+explicitly authorized switching away from yfinance for TPEx specifically
+(TAIEX is UNCHANGED -- `^TWII` has been working the whole time, so it stays
+on `fetch_index()`/yfinance exactly as before).
+
+**New source for TPEx's OHLC+Volume: TPEx's own official index-history
+report, NOT yfinance.** Found via research into how third-party Taiwan
+market-data tools source TPEx's index history (an Apify listing
+documenting its own sources named it explicitly): "櫃買指數(月查詢)"
+(TPEx Index, monthly query), a page at
+`https://www.tpex.org.tw/web/stock/iNdex_info/inxh/inx.php` -- the exact
+TPEx counterpart to TWSE's own **directly verified-live** `MI_5MINS_HIST`
+report (`https://www.twse.com.tw/indicesReport/MI_5MINS_HIST`, confirmed
+via WebFetch this session: real TAIEX Open/High/Low/Close, ROC-dated,
+month-scoped, e.g. `{"stat":"OK","fields":["日期","開盤指數","最高指數",
+"最低指數","收盤指數"],"data":[["115/08/03","42,780.42","43,784.19",
+"42,780.42","43,386.41"],...]}`). Following this project's now
+three-times-confirmed `<page>.php` -> `<page>_result.php` naming
+convention (FMTQIK, st41, and this project's own successful pattern
+matching), the result endpoint is presumed to be
+`https://www.tpex.org.tw/web/stock/iNdex_info/inxh/inx_result.php`,
+same `l=zh-tw&d=<ROC year>/<MM>&o=json` parameters as st41.
+
+**Honesty caveat, consistent with every other TPEx endpoint in this
+module**: this specific URL and its exact field names/order have NOT
+been confirmed live -- this sandbox is blocked from every tpex.org.tw
+path under `/web/` (confirmed again this session, including this exact
+guessed URL, which 403s the same way every other `/web/` path always
+has). Unlike the OHLC-value guess itself, though, this is a LOW-RISK
+guess: it reuses a URL pattern and parameter convention already
+CONFIRMED correct twice on this exact site (FMTQIK-equivalent st41, and
+the TradeValue report before it), pointed at a page TPEx's own site
+structure confirms exists (`inx.php`, "櫃買指數(月查詢)" -- found via
+search, matching the exact monthly-query shape every other report here
+uses). `_fetch_tpex_index_ohlc()` also doesn't hardcode column
+POSITIONS -- it matches columns by searching the response's own
+`fields` list for the Chinese characters for open/高/低/收, so a
+slightly different field order than TWSE's MI_5MINS_HIST (which this
+guess is modeled on) should still parse correctly; only a wrong URL or
+completely different response shape would need a fix. If the next run's
+console output shows "no OHLC data returned" or names an unrecognized
+field list, that tells us precisely what to correct -- paste it back
+rather than guessing further.
+
+**Volume**: also switched off yfinance for TPEx, reusing the ALREADY
+CONFIRMED WORKING st41_result.php report's `成交張數` (board lots,
+x1,000 for a shares-equivalent) -- the same report `fetch_tpex_trade_value()`
+already fetches successfully for TradeValue (confirmed live on the
+user's own machine: "10 day(s) merged in"). `fetch_tpex_index()` fetches
+it again independently here (a second call to the same URL, same
+month), rather than sharing `fetch_tpex_trade_value()`'s result --
+consistent with this module's established RESTRUCTURED principle that
+each concern fetches and writes for itself.
+
+**TradeValue is completely unchanged** -- still `fetch_tpex_trade_value()`'s
+job alone, called separately by `run()`; `fetch_tpex_index()` never reads
+or writes it.
 """
 
 import os
@@ -311,9 +376,13 @@ import twse_client
 import tpex_client
 from config import DATA_DIR, PRICE_HISTORY_MONTHS
 
+# Only TAIEX still goes through fetch_index()/yfinance -- TPEX switched to
+# fetch_tpex_index() (TPEx's own official reports) in the THIRD pass of the
+# TPEX OHLC GAP fix; see module docstring and run() below. Kept as a list
+# (rather than inlining TAIEX's own two values into run()) so a future
+# yfinance-sourced index can still be added the same way TAIEX already is.
 INDEXES = [
     {"code": "TAIEX", "yf_symbol": "^TWII", "name": "台股加權指數", "name_en": "TAIEX"},
-    {"code": "TPEX", "yf_symbol": "^TWOII", "name": "櫃買指數", "name_en": "TPEx Index"},
 ]
 
 FIELDNAMES = ["Date", "Open", "High", "Low", "Close", "Volume", "TradeValue"]
@@ -323,6 +392,14 @@ FMTQIK_URL = "https://www.twse.com.tw/exchangeReport/FMTQIK"
 # TPEx's own equivalent of FMTQIK -- see the module docstring's TPEX TRADE
 # VALUE ADDED section for the confirmed response shape and unit conversions.
 TPEX_TURNOVER_URL = "https://www.tpex.org.tw/web/stock/aftertrading/daily_trading_index/st41_result.php"
+
+# TPEx's own official index-history report ("櫃買指數(月查詢)") -- TPEx's
+# counterpart to TWSE's directly-verified MI_5MINS_HIST. See the module
+# docstring's THIRD pass section: this URL follows the same
+# <page>.php -> <page>_result.php convention already confirmed correct
+# twice on this site, but has NOT itself been confirmed live (this
+# sandbox is blocked from every tpex.org.tw /web/ path, this one included).
+TPEX_INDEX_HISTORY_URL = "https://www.tpex.org.tw/web/stock/iNdex_info/inxh/inx_result.php"
 
 # A Volume figure above this can only ever have come from the ORIGINAL bug
 # (FMTQIK's whole-TWSE-market 成交股數 written into Volume) -- real TAIEX/
@@ -420,6 +497,50 @@ def _months_with_turnover(existing_rows):
     return present
 
 
+def _months_with_real_ohlc(existing_rows):
+    """Which (year, month)s already have REAL (non-blank) OHLC on file --
+    same shape as _months_with_turnover() above, but keyed off Close
+    instead of TradeValue. Used by _fetch_tpex_index_ohlc()'s own month
+    targeting so it stays independent of fetch_tpex_trade_value()'s month
+    tracking -- a month that already has TradeValue (from that function)
+    but is still missing OHLC is exactly the TPEX OHLC GAP scenario the
+    module docstring describes, and must still be treated as "not yet
+    fetched" here even though _months_with_turnover() would call it
+    done."""
+    present = set()
+    for iso, row in existing_rows.items():
+        if row.get("Close"):
+            y, m = int(iso[:4]), int(iso[5:7])
+            present.add((y, m))
+    return present
+
+
+def _tpex_table(payload):
+    """Pulls (fields, data) out of a TPEx JSON payload, tolerating either
+    response shape seen on this site so far: nested under "tables" (like
+    st41_result.php) or flat at the top level (like TWSE's own
+    FMTQIK/MI_5MINS_HIST). Returns ([], []) if neither shape matches."""
+    if "tables" in payload:
+        tables = payload.get("tables") or []
+        if not tables:
+            return [], []
+        return tables[0].get("fields", []), tables[0].get("data", [])
+    return payload.get("fields", []), payload.get("data", [])
+
+
+def _find_col(fields, *keywords):
+    """Index of the first field whose Chinese label contains ALL the
+    given keyword characters (e.g. _find_col(fields, "收") for a "收盤
+    指數" column) -- used instead of a hardcoded column position for
+    _fetch_tpex_index_ohlc()'s response, since that endpoint's exact
+    field order/names have not been confirmed live (see module
+    docstring's THIRD pass caveat). Returns None if no field matches."""
+    for i, f in enumerate(fields):
+        if all(k in f for k in keywords):
+            return i
+    return None
+
+
 def _fetch_taiex_turnover(existing_rows):
     """Returns {iso_date: (shares, ntd_value)} for the whole TWSE market's
     daily turnover, from TWSE's FMTQIK report (see module docstring --
@@ -511,6 +632,131 @@ def _fetch_tpex_turnover(existing_rows):
             if lots is not None and thousands_ntd is not None:
                 result[iso] = (lots * 1000, thousands_ntd * 1000)
     return result
+
+
+def _fetch_tpex_index_ohlc_and_volume(existing_rows):
+    """Returns {iso_date: (open, high, low, close, volume_shares_or_None)}
+    for TPEx's 櫃買指數, sourced ENTIRELY from TPEx's own official
+    reports -- NOT yfinance. See module docstring's TPEX OHLC GAP THIRD
+    pass section for why: after two yfinance-side fixes still left
+    `^TWOII` returning nothing, the user explicitly authorized switching
+    TPEx's OHLC/Volume source away from yfinance (TAIEX is unaffected).
+
+    OHLC comes from TPEX_INDEX_HISTORY_URL ("櫃買指數(月查詢)") -- columns
+    are found by matching the response's own `fields` list for 開/高/低/收
+    rather than a hardcoded position, since this specific endpoint's exact
+    field order/names have not been confirmed live (this sandbox is
+    blocked from tpex.org.tw). Volume comes from the ALREADY CONFIRMED
+    WORKING TPEX_TURNOVER_URL (st41_result.php)'s own 成交張數 field
+    (board lots -> shares, x1,000) -- the same report
+    fetch_tpex_trade_value() already fetches successfully for TradeValue,
+    fetched again here independently (this module's established
+    RESTRUCTURED principle: each concern fetches for itself).
+
+    Month targeting is keyed off _months_with_real_ohlc() (Close
+    presence), NOT _months_with_turnover() (TradeValue presence) --
+    deliberately independent of fetch_tpex_trade_value()'s own month
+    tracking, so a month that already has TradeValue but is still
+    missing OHLC (the exact TPEX OHLC GAP scenario) is correctly
+    re-requested here rather than skipped."""
+    result = {}
+    present_months = _months_with_real_ohlc(existing_rows)
+    target_months = _month_starts(PRICE_HISTORY_MONTHS)
+    latest_present = max(present_months) if present_months else None
+
+    for (y, m) in target_months:
+        if (y, m) in present_months and (y, m) != latest_present:
+            continue
+        roc_param = f"{y - 1911}/{m:02d}"
+
+        month_ohlc = {}
+        ohlc_payload = tpex_client.get_json(
+            TPEX_INDEX_HISTORY_URL, params={"l": "zh-tw", "d": roc_param, "o": "json"}
+        )
+        if ohlc_payload and str(ohlc_payload.get("stat", "")).lower() == "ok":
+            fields, data = _tpex_table(ohlc_payload)
+            idx_open = _find_col(fields, "開")
+            idx_high = _find_col(fields, "高")
+            idx_low = _find_col(fields, "低")
+            idx_close = _find_col(fields, "收")
+            if idx_close is None:
+                print(f"  [!] TPEx index-history response for {roc_param} had no recognizable "
+                      f"Close column -- fields were: {fields}")
+            else:
+                for row in data:
+                    try:
+                        iso = _roc_to_iso(row[0])
+                    except (ValueError, IndexError):
+                        continue
+                    c = _num(row[idx_close]) if idx_close < len(row) else None
+                    if c is None:
+                        continue
+                    o = _num(row[idx_open]) if idx_open is not None and idx_open < len(row) else None
+                    h = _num(row[idx_high]) if idx_high is not None and idx_high < len(row) else None
+                    lo = _num(row[idx_low]) if idx_low is not None and idx_low < len(row) else None
+                    month_ohlc[iso] = (o, h, lo, c)
+        # else: common/expected (outside retention window, or this guessed
+        # URL is wrong) -- still try volume below rather than aborting.
+
+        month_lots = {}
+        volume_payload = tpex_client.get_json(
+            TPEX_TURNOVER_URL, params={"l": "zh-tw", "d": roc_param, "o": "json"}
+        )
+        if volume_payload and str(volume_payload.get("stat", "")).lower() == "ok":
+            fields, data = _tpex_table(volume_payload)
+            for row in data:
+                try:
+                    iso = _roc_to_iso(row[0])
+                except (ValueError, IndexError):
+                    continue
+                lots = _num(row[1]) if len(row) > 1 else None
+                if lots is not None:
+                    month_lots[iso] = lots * 1000
+
+        for iso, (o, h, lo, c) in month_ohlc.items():
+            result[iso] = (o, h, lo, c, month_lots.get(iso))
+
+    return result
+
+
+def fetch_tpex_index():
+    """TPEx's OHLC+Volume fetch -- NOT yfinance. See module docstring's
+    TPEX OHLC GAP THIRD pass section: after raise_errors=True and the
+    start-date placeholder-row fix both failed to close the gap, the user
+    explicitly asked to change methods for TPEx specifically. TAIEX is
+    UNCHANGED and still uses fetch_index()/yfinance (`^TWII` has been
+    working this whole time) -- only TPEX.csv's fetch path changes here.
+
+    Writes Open/High/Low/Close/Volume only, exactly like fetch_index()
+    did -- TradeValue is untouched, still fetch_tpex_trade_value()'s job
+    alone. See _fetch_tpex_index_ohlc_and_volume() for the actual sourcing
+    (TPEx's own official index-history report for OHLC, TPEx's own
+    already-working st41 report for Volume) and its honesty caveats
+    (the OHLC endpoint's exact URL/field names are an educated guess,
+    not yet confirmed live -- the console output here says exactly what
+    came back if it doesn't parse)."""
+    code = "TPEX"
+    print(f"[market_index] {code} OHLC/Volume (TPEx 櫃買指數 月查詢 + st41, NOT yfinance)")
+    existing = _load_existing(code)
+    fetched = _fetch_tpex_index_ohlc_and_volume(existing)
+    if not fetched:
+        print("  -> no OHLC data returned")
+        return
+
+    for iso, (o, h, lo, c, volume_shares) in fetched.items():
+        row = existing.get(iso) or {
+            "Date": iso, "Open": "", "High": "", "Low": "", "Close": "", "Volume": "", "TradeValue": ""
+        }
+        row["Open"] = o if o is not None else ""
+        row["High"] = h if h is not None else ""
+        row["Low"] = lo if lo is not None else ""
+        row["Close"] = c
+        if volume_shares is not None:
+            row["Volume"] = int(volume_shares)
+        existing[iso] = row
+
+    _write_csv(code, existing)
+    print(f"  -> {len(fetched)} trading day(s) of TPEx OHLC/Volume merged in (inx_result.php + st41_result.php)")
 
 
 def _rows_from_history(hist):
@@ -657,7 +903,22 @@ def fetch_index(code, yf_symbol, name_label):
         print("  -> no data returned (empty result, but no exception raised)")
         return
 
-    existing.update(new_rows)
+    # Merge field-aware, NOT existing.update(new_rows) -- found this bug
+    # while testing the TPEX OHLC GAP fix: _rows_from_history() always sets
+    # "TradeValue": "" in every row it returns (yfinance has no TradeValue
+    # of its own), and a blind dict.update() replaces the WHOLE existing
+    # row for that date -- so the moment yfinance successfully returns OHLC
+    # for a date that already had a real TradeValue (written earlier by
+    # fetch_taiex_trade_value() as a placeholder row, or even after a
+    # normal successful day), that TradeValue would silently get wiped
+    # back to blank. Preserving whatever TradeValue is already on file
+    # keeps this function honestly scoped to OHLC/Volume only, matching
+    # what its own docstring already claimed.
+    for iso, row in new_rows.items():
+        if iso in existing:
+            row["TradeValue"] = existing[iso].get("TradeValue", "")
+        existing[iso] = row
+
     _write_csv(code, existing)
     print(f"  -> {len(existing)} trading days saved")
 
@@ -738,6 +999,7 @@ def fetch_tpex_trade_value():
 def run():
     for idx in INDEXES:
         fetch_index(idx["code"], idx["yf_symbol"], f'{idx["name"]} ({idx["name_en"]})')
+    fetch_tpex_index()
     fetch_taiex_trade_value()
     fetch_tpex_trade_value()
 
