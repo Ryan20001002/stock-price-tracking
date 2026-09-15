@@ -1021,11 +1021,19 @@ with tab_overview:
 with tab_market_index:
     st.caption(
         "台灣大盤指數 -- 不受你的追蹤清單影響，固定顯示以下兩個指數；"
-        "資料來源為 yfinance（Yahoo Finance），第一次使用請在側邊欄點擊"
+        "TAIEX 資料來源為 yfinance（Yahoo Finance），櫃買指數（TPEx）改為"
+        "直接取自櫃買中心官方報表（詳見下方說明），第一次使用請在側邊欄點擊"
         "「抓取大盤指數（TAIEX／櫃買指數）」。"
     )
-    idx_codes = [i["code"] for i in market_index_data.INDEXES]
-    idx_names = {i["code"]: i["name"] for i in market_index_data.INDEXES}
+    # Use DISPLAY_INDEXES, not INDEXES, to populate the dropdown -- INDEXES is
+    # now purely about which indices go through the generic yfinance-based
+    # fetch_index() loop (TAIEX only, since the THIRD-pass TPEX OHLC GAP fix
+    # moved TPEX to fetch_tpex_index()). Reading INDEXES here made TPEX
+    # silently disappear from this dropdown even though TPEX.csv is still
+    # fetched and populated; see market_index_data.py's DISPLAY_INDEXES
+    # comment. Fixed 2026-09-15 in response to the user's screenshot report.
+    idx_codes = [i["code"] for i in market_index_data.DISPLAY_INDEXES]
+    idx_names = {i["code"]: i["name"] for i in market_index_data.DISPLAY_INDEXES}
     picked_idx = st.selectbox(
         "選擇指數", idx_codes, format_func=lambda c: f"{c} {idx_names[c]}", key="market_index_picker",
     )

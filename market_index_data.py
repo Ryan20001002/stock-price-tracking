@@ -381,8 +381,28 @@ from config import DATA_DIR, PRICE_HISTORY_MONTHS
 # TPEX OHLC GAP fix; see module docstring and run() below. Kept as a list
 # (rather than inlining TAIEX's own two values into run()) so a future
 # yfinance-sourced index can still be added the same way TAIEX already is.
+#
+# IMPORTANT: this list is now purely about *fetch mechanism* (which indices
+# go through the generic yfinance-based fetch_index() loop), NOT about which
+# indices exist or should be selectable in the UI. app.py's 大盤指數 tab used
+# to build its "選擇指數" dropdown options directly from INDEXES; once TPEX
+# was removed here (THIRD pass), TPEX silently vanished from that dropdown
+# even though TPEX.csv is still fetched (via fetch_tpex_index() below) and
+# still populated on disk. Found 2026-09-15 from the user's screenshot
+# ("Currently, the index directly disappear in the list"). Fixed by adding
+# DISPLAY_INDEXES below, which app.py now reads instead -- see that comment.
 INDEXES = [
     {"code": "TAIEX", "yf_symbol": "^TWII", "name": "台股加權指數", "name_en": "TAIEX"},
+]
+
+# The full set of indices the UI should offer, independent of which backend
+# function fetches each one's CSV. TAIEX -> fetch_index()/yfinance (via the
+# INDEXES loop above); TPEX -> fetch_tpex_index() (TPEx's own reports, THIRD
+# pass). Add a new index here whenever one becomes selectable, regardless of
+# which fetch path it uses.
+DISPLAY_INDEXES = [
+    {"code": "TAIEX", "name": "台股加權指數", "name_en": "TAIEX"},
+    {"code": "TPEX", "name": "櫃買指數", "name_en": "TPEX"},
 ]
 
 FIELDNAMES = ["Date", "Open", "High", "Low", "Close", "Volume", "TradeValue"]
