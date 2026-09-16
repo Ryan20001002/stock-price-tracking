@@ -402,6 +402,72 @@ fabricated), and by clearing any already-written whole-market-scale
 Volume value on the next run, reusing the existing
 VOLUME_CONTAMINATION_THRESHOLD/_find_contaminated_dates machinery
 fetch_index() already uses for the TAIEX side of this exact mistake.
+
+SEVENTH pass -- RECONSTRUCTION (2026-09-16, by explicit request: "Let's
+reconstruct the code of fetching OTC market index... grab both HLOC
+price, trading volume and total value of transaction... check that there
+is not missing data in the fetching period"). Rebuilds TPEX's fetch as a
+single, unified pipeline instead of the three separate passes/functions
+above, and fixes two real problems those passes left standing:
+
+  1. **Volume is back, on purpose, sourced consistently for the WHOLE
+     file.** The SIXTH pass removed Volume entirely because mixing two
+     eras' worth of incompatible scales (old yfinance-sourced millions,
+     new st41-sourced billions) in one column broke the chart. That was
+     the right call given the file's mixed history at the time, but it
+     left "trading volume" -- something the user explicitly asked this
+     module to fetch -- permanently blank for TPEx. The real fix isn't
+     "never use st41's 成交張數 for Volume", it's "never let two
+     different scales coexist in the same column": this reconstruction
+     sources Volume from st41 consistently, for every date, including
+     RE-fetching old dates that still carry a blank or legacy-scale
+     value (see _incomplete_tpex_months() below), so the whole column is
+     one consistent quantity end to end. It is TPEx's WHOLE-MARKET total
+     (every OTC-listed stock combined) -- same scope as TradeValue,
+     which the UI caption already treats this way -- not a literal
+     "this index's own volume" (composite indices don't really have
+     one); the caption is updated to say so plainly instead of claiming
+     no source exists.
+  2. **A month was marked "done" forever the moment it had ONE real
+     date.** `_months_with_real_ohlc()`/`_months_with_turnover()` (THIRD/
+     FOURTH/FIFTH/SIXTH pass) only checked whether a (year, month) had
+     ANY row with real data -- so a month where the guessed endpoint
+     partially failed (e.g. 2 real days out of 20 trading days) got
+     silently marked complete and was never revisited, with no signal
+     to the user that 18 real trading days were missing. Replaced with
+     `_incomplete_tpex_months()`: TAIEX's own dates (already reliable,
+     fetched first in every run()) are used as the reference trading
+     calendar -- TWSE and TPEx share the exact same national-holiday
+     calendar -- so a TPEx month only counts as complete once it has
+     BOTH real OHLC (Close) AND real Volume for every date TAIEX has
+     that month. Anything short of that gets re-requested on the next
+     run, not skipped.
+
+  `_fetch_tpex_index_full()` replaces `_fetch_tpex_index_ohlc_and_volume()`
+  -- one unified pass per incomplete month, fetching OHLC from
+  TPEX_INDEX_HISTORY_URL and Volume+TradeValue together from
+  TPEX_TURNOVER_URL (st41), so a date's OHLC and its Volume/TradeValue
+  are always fetched and merged together, eliminating the class of bug
+  where two different fetches key the same real date under two different
+  formats and never merge (the FIFTH pass). `fetch_tpex_index()` now
+  writes Open/High/Low/Close/Volume/TradeValue all in one pass; the
+  previously-separate `fetch_tpex_trade_value()` is no longer called from
+  `run()` for this reason (it would just re-fetch the identical st41 data
+  a second time) -- the function itself is left defined, unused by
+  `run()`, in case a standalone TradeValue-only repair is ever needed.
+  TAIEX is completely unaffected: `fetch_index()`/yfinance and
+  `fetch_taiex_trade_value()`/FMTQIK are untouched.
+
+  **Missing-data check, run in TWO places** (per the explicit "check
+  there is not missing data... before show on the webpage" request):
+  `fetch_tpex_index()` itself self-heals via the completeness-based month
+  targeting above, and separately, independently, `app.py`'s 大盤指數 tab
+  now cross-checks TPEX's dates against TAIEX's dates at DISPLAY time
+  (see `app.py`'s new warning block) -- this catches a gap even when the
+  fetch script hasn't been re-run since TPEx's own report genuinely had
+  no data for a real trading day (a live reporting gap on TPEx's end that
+  no amount of retrying would fix), rather than only checking at fetch
+  time and trusting the file blindly thereafter.
 """
 
 import os
@@ -466,6 +532,28 @@ TPEX_INDEX_HISTORY_URL = "https://www.tpex.org.tw/web/stock/iNdex_info/inxh/inx_
 # of magnitude below this. See module docstring's RESTRUCTURED note and
 # _find_contaminated_dates() below.
 VOLUME_CONTAMINATION_THRESHOLD = 100_000_000
+
+# RECONSTRUCTION (SEVENTH pass, 2026-09-16): any TPEX Volume below this is
+# presumed to be a LEGACY yfinance-era per-index figure (~1,000,000 scale,
+# see the THIRD/SIXTH pass notes above) rather than st41's whole-market
+# 成交張數-derived figure (which should always be tens/hundreds of millions
+# or more -- real observed examples: 682,447,000 and 783,768,000). Used by
+# _incomplete_tpex_months() to force such dates to be re-fetched and
+# overwritten with the new, consistently-sourced figure, rather than being
+# mistaken for "already complete" and left mixing two incompatible scales
+# forever -- the exact bug the SIXTH pass fixed once already.
+TPEX_VOLUME_MIN_PLAUSIBLE = 10_000_000
+
+# RECONSTRUCTION (SEVENTH pass): TPEx's own turnover report (st41, used for
+# both Volume and TradeValue) is documented -- via the user's own live
+# observation -- to retain roughly a year of history. Requiring Volume
+# completeness beyond this window would cause an infinite, pointless
+# re-fetch of the same permanently-unavailable months on every single run.
+# A generous ~14-month buffer over "roughly a year". Outside this window,
+# _incomplete_tpex_months() only requires OHLC (Close) completeness,
+# matching this project's already-accepted limitation for TradeValue's own
+# retention.
+TPEX_TURNOVER_RETENTION_MONTHS = 14
 
 
 def _csv_path(code):
@@ -619,22 +707,124 @@ def _months_with_turnover(existing_rows):
     return present
 
 
-def _months_with_real_ohlc(existing_rows):
-    """Which (year, month)s already have REAL (non-blank) OHLC on file --
-    same shape as _months_with_turnover() above, but keyed off Close
-    instead of TradeValue. Used by _fetch_tpex_index_ohlc()'s own month
-    targeting so it stays independent of fetch_tpex_trade_value()'s month
-    tracking -- a month that already has TradeValue (from that function)
-    but is still missing OHLC is exactly the TPEX OHLC GAP scenario the
-    module docstring describes, and must still be treated as "not yet
-    fetched" here even though _months_with_turnover() would call it
-    done."""
-    present = set()
-    for iso, row in existing_rows.items():
-        if row.get("Close"):
-            y, m = int(iso[:4]), int(iso[5:7])
-            present.add((y, m))
-    return present
+def _real_dates_by_month(rows, require_fields=("Close",), min_volume=None):
+    """Returns {(y, m): set(iso dates)} for every date in `rows` that has
+    a real (non-blank) value in EVERY field named in `require_fields`.
+    RECONSTRUCTION (SEVENTH pass, 2026-09-16): generalizes the old
+    _months_with_real_ohlc()/_months_with_turnover() (which only tracked
+    WHICH months had ANY matching row) into full per-month date SETS, so
+    callers can compare COMPLETENESS against a reference calendar --
+    exactly which trading days are covered, not just whether the month
+    has been touched at all. See _incomplete_tpex_months().
+
+    `min_volume`, when given, additionally requires the row's Volume to
+    be at least that large to count as "real" -- used to distinguish
+    TPEx's new, consistently-sourced whole-market Volume (hundreds of
+    millions+) from a LEGACY yfinance-era per-index figure (~1,000,000
+    scale) that's merely non-blank but the wrong quantity entirely; see
+    TPEX_VOLUME_MIN_PLAUSIBLE."""
+    buckets = {}
+    for iso, row in rows.items():
+        if not all(row.get(f) not in (None, "") for f in require_fields):
+            continue
+        if min_volume is not None:
+            v = _num(row.get("Volume"))
+            if v is None or v < min_volume:
+                continue
+        y, m = int(iso[:4]), int(iso[5:7])
+        buckets.setdefault((y, m), set()).add(iso)
+    return buckets
+
+
+def _incomplete_tpex_months(tpex_rows, taiex_rows, target_months):
+    """Which (year, month)s in target_months still need fetching for
+    TPEX, using TAIEX's own dates as the reference trading calendar (TWSE
+    and TPEx share the exact same national-holiday calendar, so a fully-
+    fetched TPEx month should cover the same trading days TAIEX has for
+    that month). RECONSTRUCTION (SEVENTH pass, 2026-09-16): replaces the
+    old "does this month have ANY real-OHLC row" check, which silently
+    marked a month done forever the moment ONE date arrived even if most
+    of that month's real trading days never did -- exactly the kind of
+    gap the user asked this reconstruction to catch.
+
+    A TPEX date counts as "covered" once it has real OHLC (Close), and --
+    ONLY within the last TPEX_TURNOVER_RETENTION_MONTHS -- also a
+    plausibly-sized real Volume (see TPEX_VOLUME_MIN_PLAUSIBLE). Both
+    limits exist for real, tested reasons:
+
+      - Requiring Volume only within a bounded recent window (not the
+        full fetch period) avoids an infinite, pointless re-fetch of the
+        same permanently-unavailable old months on every single run --
+        TPEx's turnover report (st41, the Volume/TradeValue source) is
+        documented to retain roughly a year of history, so requiring
+        Volume completeness beyond that would never succeed and would
+        just add wasted network calls forever. Outside the window, only
+        OHLC completeness is required, matching this project's
+        already-accepted limitation for TradeValue's own retention.
+      - Requiring a MINIMUM plausible Volume (not just "non-blank") is
+        what actually makes it safe to reintroduce Volume this pass: a
+        blank check alone would treat an old, still-present LEGACY
+        yfinance-era Volume value (~1,000,000 scale, non-blank but the
+        wrong quantity) as "already complete" and never replace it,
+        silently recreating the exact scale-mixing bug the SIXTH pass
+        fixed once already. Requiring it be at least
+        TPEX_VOLUME_MIN_PLAUSIBLE forces such dates to be re-fetched and
+        overwritten with the new, consistently-sourced figure instead.
+
+    The latest target month is ALWAYS included, even if it looks
+    complete so far (it may still be in progress) -- same "always
+    reconfirm the most recent point" idea used throughout this module.
+    A month TAIEX itself has no data for yet (e.g. a future month) falls
+    back to "does TPEX have anything at all", so this doesn't spin
+    forever re-requesting a month neither index can supply."""
+    tpex_close_by_month = _real_dates_by_month(tpex_rows, require_fields=("Close",))
+    tpex_full_by_month = _real_dates_by_month(
+        tpex_rows, require_fields=("Close", "Volume"), min_volume=TPEX_VOLUME_MIN_PLAUSIBLE
+    )
+    taiex_by_month = _real_dates_by_month(taiex_rows, require_fields=("Close",))
+    latest = max(target_months) if target_months else None
+    recent_window = set(_month_starts(TPEX_TURNOVER_RETENTION_MONTHS)) if target_months else set()
+    incomplete = set()
+    for (y, m) in target_months:
+        if (y, m) == latest:
+            incomplete.add((y, m))
+            continue
+        require_volume = (y, m) in recent_window
+        present = tpex_full_by_month.get((y, m), set()) if require_volume else tpex_close_by_month.get((y, m), set())
+        reference = taiex_by_month.get((y, m))
+        if not reference:
+            if not present:
+                incomplete.add((y, m))
+        elif not reference.issubset(present):
+            incomplete.add((y, m))
+    return incomplete
+
+
+def _missing_tpex_dates_in_range(tpex_rows, taiex_rows, start_iso=None, end_iso=None):
+    """RECONSTRUCTION (SEVENTH pass, 2026-09-16, explicit request: "before
+    show on the webpage, pls check that there is not missing data in the
+    fetching period"). Real TAIEX trading dates (optionally restricted to
+    [start_iso, end_iso]) that have no corresponding real TPEX Close --
+    the display-time counterpart to _incomplete_tpex_months()'s fetch-time
+    check, run independently so a gap is caught even when the fetch
+    script hasn't been re-run since TPEx's own report genuinely had no
+    data for a real trading day (a live reporting gap on TPEx's end that
+    no amount of retrying would fix). The single most recent TAIEX date
+    is always excluded, to avoid a same-day false alarm from ordinary
+    reporting lag between the two exchanges' sites."""
+    taiex_dates = sorted(iso for iso, row in taiex_rows.items() if row.get("Close"))
+    if not taiex_dates:
+        return []
+    latest = taiex_dates[-1]
+    tpex_dates = {iso for iso, row in tpex_rows.items() if row.get("Close")}
+    missing = [
+        iso for iso in taiex_dates
+        if iso != latest
+        and (start_iso is None or iso >= start_iso)
+        and (end_iso is None or iso <= end_iso)
+        and iso not in tpex_dates
+    ]
+    return missing
 
 
 def _tpex_table(payload):
@@ -756,49 +946,59 @@ def _fetch_tpex_turnover(existing_rows):
     return result
 
 
-def _fetch_tpex_index_ohlc_and_volume(existing_rows):
-    """Returns {iso_date: (open, high, low, close)} for TPEx's 櫃買指數,
-    sourced ENTIRELY from TPEx's own official OHLC report -- NOT yfinance.
-    See module docstring's TPEX OHLC GAP THIRD pass section for why: after
-    two yfinance-side fixes still left `^TWOII` returning nothing, the user
-    explicitly authorized switching TPEx's OHLC source away from yfinance
-    (TAIEX is unaffected).
+def _fetch_tpex_index_full(existing_rows, taiex_rows):
+    """RECONSTRUCTION (SEVENTH pass, 2026-09-16, by explicit request:
+    "grab both HLOC price, trading volume and total value of
+    transaction... check that there is not missing data"). Single,
+    unified pass over BOTH of TPEx's own confirmed-working official
+    reports, replacing the old OHLC-only _fetch_tpex_index_ohlc_and_volume().
+    Returns {iso_date: (open, high, low, close, volume_or_None,
+    trade_value_or_None)}.
 
-    OHLC comes from TPEX_INDEX_HISTORY_URL ("櫃買指數(月查詢)") -- columns
-    are found by matching the response's own `fields` list for 開/高/低/收
-    rather than a hardcoded position, since this specific endpoint's exact
-    field order/names have not been confirmed live (this sandbox is
-    blocked from tpex.org.tw).
+      - OHLC comes from TPEX_INDEX_HISTORY_URL ("櫃買指數(月查詢)") --
+        columns found by matching the response's own `fields` list for
+        開/高/低/收 rather than a hardcoded position (this endpoint's
+        exact field order/names were never confirmed live from this
+        sandbox, though the FIFTH pass's user-uploaded CSV proved the
+        URL itself is correct and returns real data). Dates parsed with
+        _tpex_index_date_to_iso() -- this endpoint is Gregorian-dated,
+        NOT ROC like every other report here (see that function's
+        docstring, found from the FIFTH pass's "merged in an incorrect
+        way" bug).
+      - Volume + TradeValue both come from TPEX_TURNOVER_URL
+        (st41_result.php, "日成交量值指數"), ROC-dated, confirmed live
+        repeatedly this project. 成交張數 (board lots) -> shares
+        (x1,000) for Volume, 金額（仟元） -> raw NTD (x1,000) for
+        TradeValue. Both are TPEx's WHOLE-MARKET totals (every OTC-listed
+        stock combined) -- same scope as TAIEX's own TradeValue (from
+        TWSE's FMTQIK); 櫃買指數 itself, like any composite index, has no
+        literal trading volume of its own, and this is the closest real,
+        live, free number TPEx publishes. Used consistently for Volume
+        across the WHOLE TPEX.csv history now (see fetch_tpex_index()'s
+        docstring for why this reconstruction can do that safely, unlike
+        the THIRD pass's yfinance-then-st41 splice that caused the SIXTH
+        pass's bug).
 
-    Despite the name, this does NOT return Volume (removed in the SIXTH
-    pass, 2026-09-15, "How about the plot here?" -- see module docstring):
-    an earlier version of this function also pulled Volume from
-    TPEX_TURNOVER_URL (st41_result.php)'s 成交張數 field, but that is
-    TPEx's WHOLE-MARKET board-lots total, not 櫃買指數's own trading
-    volume -- the exact same category of mistake this module's TAIEX side
-    already caught and fixed once (see VOLUME_CONTAMINATION_THRESHOLD /
-    the CORRECTION note above). There is currently no known free source
-    for 櫃買指數's own per-index Volume now that `^TWOII` has broken on
-    yfinance, so this function no longer fabricates one; fetch_tpex_index()
-    leaves Volume untouched going forward. The function name/signature is
-    kept for now rather than renamed, to keep this diff minimal.
+    Fetched together, from the same month, so a date's OHLC and its
+    Volume/TradeValue are always merged under the SAME key -- eliminates
+    the class of bug where two fetches key the same real date under two
+    different date-string formats and never merge (the FIFTH pass).
 
-    Month targeting is keyed off _months_with_real_ohlc() (Close
-    presence), NOT _months_with_turnover() (TradeValue presence) --
-    deliberately independent of fetch_tpex_trade_value()'s own month
-    tracking, so a month that already has TradeValue but is still
-    missing OHLC (the exact TPEX OHLC GAP scenario) is correctly
-    re-requested here rather than skipped."""
+    Month targeting uses _incomplete_tpex_months(), which re-requests a
+    month if it's missing ANY trading day TAIEX already has for that
+    month (OHLC or Volume) -- not just "has TPEX got ANY row yet", which
+    is what silently let a partially-fetched month get marked done
+    forever under the old logic."""
     result = {}
-    present_months = _months_with_real_ohlc(existing_rows)
     target_months = _month_starts(PRICE_HISTORY_MONTHS)
-    latest_present = max(present_months) if present_months else None
+    incomplete = _incomplete_tpex_months(existing_rows, taiex_rows, target_months)
 
     for (y, m) in target_months:
-        if (y, m) in present_months and (y, m) != latest_present:
+        if (y, m) not in incomplete:
             continue
         roc_param = f"{y - 1911}/{m:02d}"
 
+        month_ohlc = {}
         ohlc_payload = tpex_client.get_json(
             TPEX_INDEX_HISTORY_URL, params={"l": "zh-tw", "d": roc_param, "o": "json"}
         )
@@ -814,12 +1014,6 @@ def _fetch_tpex_index_ohlc_and_volume(existing_rows):
             else:
                 for row in data:
                     try:
-                        # NOT _roc_to_iso -- this endpoint's date field is
-                        # plain Gregorian, not ROC, unlike every other
-                        # report this module reads. See
-                        # _tpex_index_date_to_iso's docstring for the full
-                        # story (found 2026-09-15 from a user-reported
-                        # "merged in an incorrect way" bug).
                         iso = _tpex_index_date_to_iso(row[0])
                     except (ValueError, IndexError):
                         continue
@@ -829,49 +1023,65 @@ def _fetch_tpex_index_ohlc_and_volume(existing_rows):
                     o = _num(row[idx_open]) if idx_open is not None and idx_open < len(row) else None
                     h = _num(row[idx_high]) if idx_high is not None and idx_high < len(row) else None
                     lo = _num(row[idx_low]) if idx_low is not None and idx_low < len(row) else None
-                    result[iso] = (o, h, lo, c)
+                    month_ohlc[iso] = (o, h, lo, c)
         # else: common/expected (outside retention window, or this guessed
-        # URL is wrong) -- next run will retry this month.
+        # URL is wrong) -- still try volume/value below; next run retries
+        # this month since it'll still look incomplete.
+
+        month_vol_value = {}
+        turnover_payload = tpex_client.get_json(
+            TPEX_TURNOVER_URL, params={"l": "zh-tw", "d": roc_param, "o": "json"}
+        )
+        if turnover_payload and str(turnover_payload.get("stat", "")).lower() == "ok":
+            fields, data = _tpex_table(turnover_payload)
+            for row in data:
+                try:
+                    iso = _roc_to_iso(row[0])
+                except (ValueError, IndexError):
+                    continue
+                lots = _num(row[1]) if len(row) > 1 else None
+                thousands_ntd = _num(row[2]) if len(row) > 2 else None
+                vol = lots * 1000 if lots is not None else None
+                val = thousands_ntd * 1000 if thousands_ntd is not None else None
+                month_vol_value[iso] = (vol, val)
+
+        all_isos = set(month_ohlc) | set(month_vol_value)
+        for iso in all_isos:
+            o, h, lo, c = month_ohlc.get(iso, (None, None, None, None))
+            vol, val = month_vol_value.get(iso, (None, None))
+            result[iso] = (o, h, lo, c, vol, val)
 
     return result
 
 
 def fetch_tpex_index():
-    """TPEx's OHLC fetch -- NOT yfinance. See module docstring's TPEX OHLC
-    GAP THIRD pass section: after raise_errors=True and the start-date
-    placeholder-row fix both failed to close the gap, the user explicitly
-    asked to change methods for TPEx specifically. TAIEX is UNCHANGED and
-    still uses fetch_index()/yfinance (`^TWII` has been working this whole
-    time) -- only TPEX.csv's fetch path changes here.
+    """RECONSTRUCTION (SEVENTH pass, 2026-09-16, by explicit request: "Let's
+    reconstruct the code of fetching OTC market index... grab both HLOC
+    price, trading volume and total value of transaction... check that
+    there is not missing data in the fetching period"). Single, unified
+    TPEx fetch -- NOT yfinance -- writing Open/High/Low/Close/Volume/
+    TradeValue all together in one pass, replacing the THIRD-pass
+    OHLC-only fetch_tpex_index() + separate fetch_tpex_trade_value() call
+    that used to run as two independent fetches of overlapping data.
+    TAIEX is completely UNCHANGED and still uses fetch_index()/yfinance +
+    fetch_taiex_trade_value()/FMTQIK.
 
-    Writes Open/High/Low/Close only (Volume as of the SIXTH pass -- see
-    below); TradeValue is untouched, still fetch_tpex_trade_value()'s job
-    alone. See _fetch_tpex_index_ohlc_and_volume() for the actual sourcing
-    (TPEx's own official index-history report) and its honesty caveats
-    (the OHLC endpoint's exact URL/field names are an educated guess, not
-    yet confirmed live -- the console output here says exactly what came
-    back if it doesn't parse).
+    See _fetch_tpex_index_full()'s docstring for the sourcing (OHLC from
+    TPEx's own official index-history report, Volume+TradeValue together
+    from TPEx's own official turnover report) and _incomplete_tpex_months()
+    for the month-completeness logic that replaces the old "any single
+    date marks a month done forever" check -- this is what lets Volume be
+    reintroduced safely this time: every date, old or new, is fetched
+    from the SAME source, so the file never again mixes two incompatible
+    Volume scales the way the THIRD-then-SIXTH pass saga did.
 
-    SIXTH pass (2026-09-15, "How about the plot here?" -- the user's
-    成交量 chart showed nothing before ~2026-07, then a sudden jump to
-    0.5B-1.5B-scale bars): this function used to also write Volume from
-    st41's 成交張數 (TPEx's WHOLE-MARKET board-lots total), a completely
-    different and ~700x larger quantity than TPEX.csv's older,
-    yfinance-sourced Volume (~1,000,000 scale, same order as TAIEX's own
-    yfinance Volume) -- the exact same category of mistake this module's
-    TAIEX side already caught and fixed once (see the CORRECTION note in
-    the module docstring and VOLUME_CONTAMINATION_THRESHOLD). On a linear
-    chart spanning both eras, the old millions-scale bars are invisible
-    next to the new billions-scale ones, which is exactly what the user's
-    screenshot showed. Fixed by no longer writing Volume from st41 at all
-    (there is no known free source for 櫃買指數's own per-index Volume now
-    that `^TWOII` is broken) and by clearing any already-written
-    whole-market-scale Volume value below, reusing the same
-    VOLUME_CONTAMINATION_THRESHOLD/_find_contaminated_dates machinery
-    fetch_index() already uses for TAIEX."""
+    Also purges any already-on-disk row with a garbage date (the FIFTH
+    pass's Gregorian/ROC mix-up) before fetching, so it gets correctly
+    re-requested rather than lingering forever."""
     code = "TPEX"
-    print(f"[market_index] {code} OHLC (TPEx 櫃買指數 月查詢, NOT yfinance)")
+    print(f"[market_index] {code} OHLC + Volume + TradeValue (TPEx official reports, RECONSTRUCTED)")
     existing = _load_existing(code)
+    taiex_existing = _load_existing("TAIEX")
 
     existing, purged = _purge_garbage_date_rows(existing)
     if purged:
@@ -880,39 +1090,42 @@ def fetch_tpex_index():
               f"be re-fetched below")
         _write_csv(code, existing)
 
-    # SIXTH pass: clear any Volume value that's really TPEx's whole-market
-    # total (成交張數 x1,000), not 櫃買指數's own volume -- see this
-    # function's docstring above. Left blank afterward, same as any other
-    # field with no reliable source, rather than substituting a different,
-    # much larger quantity.
-    contaminated = _find_contaminated_dates(existing)
-    if contaminated:
-        for iso in contaminated:
-            existing[iso]["Volume"] = ""
-        print(f"  [!] cleared {len(contaminated)} Volume value(s) that were really TPEx's "
-              f"whole-market 成交張數 total, not 櫃買指數's own volume (Volume > "
-              f"{VOLUME_CONTAMINATION_THRESHOLD:,}) -- left blank, no fabricated substitute written")
-        _write_csv(code, existing)
-
-    fetched = _fetch_tpex_index_ohlc_and_volume(existing)
+    fetched = _fetch_tpex_index_full(existing, taiex_existing)
     if not fetched:
-        print("  -> no OHLC data returned")
+        print("  -> no data returned")
         return
 
-    for iso, (o, h, lo, c) in fetched.items():
+    for iso, (o, h, lo, c, vol, val) in fetched.items():
         row = existing.get(iso) or {
             "Date": iso, "Open": "", "High": "", "Low": "", "Close": "", "Volume": "", "TradeValue": ""
         }
-        row["Open"] = o if o is not None else ""
-        row["High"] = h if h is not None else ""
-        row["Low"] = lo if lo is not None else ""
-        row["Close"] = c
-        # Volume intentionally left untouched -- see docstring above.
+        if c is not None:
+            row["Open"] = o if o is not None else ""
+            row["High"] = h if h is not None else ""
+            row["Low"] = lo if lo is not None else ""
+            row["Close"] = c
+        if vol is not None:
+            row["Volume"] = int(vol)
+        if val is not None:
+            row["TradeValue"] = val
         existing[iso] = row
 
     _write_csv(code, existing)
-    print(f"  -> {len(fetched)} trading day(s) of TPEx OHLC merged in (inx_result.php); "
-          f"Volume left as-is (no reliable per-index source)")
+
+    # RECONSTRUCTION's explicit "check for missing data" request -- this is
+    # the fetch-time half; app.py's 大盤指數 tab runs an independent
+    # display-time check too (see _missing_tpex_dates_in_range()), so a gap
+    # is caught even without re-running this script.
+    still_missing = _missing_tpex_dates_in_range(existing, taiex_existing)
+    if still_missing:
+        preview = ", ".join(still_missing[:5])
+        more = f" (+{len(still_missing) - 5} more)" if len(still_missing) > 5 else ""
+        print(f"  [!] STILL missing {len(still_missing)} TPEx trading day(s) after this fetch: "
+              f"{preview}{more} -- TPEx's own report may not have this data yet (a live reporting "
+              f"gap on their end, or outside its retention window); will keep retrying on future runs")
+
+    print(f"  -> {len(fetched)} date(s) of TPEx OHLC/Volume/TradeValue merged in "
+          f"(inx_result.php + st41_result.php)")
 
 
 def _rows_from_history(hist):
@@ -1155,9 +1368,13 @@ def fetch_tpex_trade_value():
 def run():
     for idx in INDEXES:
         fetch_index(idx["code"], idx["yf_symbol"], f'{idx["name"]} ({idx["name_en"]})')
-    fetch_tpex_index()
+    fetch_tpex_index()  # RECONSTRUCTION: now fetches TPEX OHLC/Volume/TradeValue together
     fetch_taiex_trade_value()
-    fetch_tpex_trade_value()
+    # fetch_tpex_trade_value() is deliberately NOT called here anymore --
+    # fetch_tpex_index() now fetches Volume+TradeValue together with OHLC
+    # from the same st41 report (see its docstring), so calling this
+    # separately would just re-fetch the identical data a second time.
+    # The function is kept, unused by run(), for a standalone repair.
 
 
 if __name__ == "__main__":

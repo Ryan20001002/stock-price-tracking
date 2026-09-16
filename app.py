@@ -1044,6 +1044,36 @@ with tab_market_index:
         idx_data["Date"] = pd.to_datetime(idx_data["Date"])
         idx_data = idx_data.sort_values("Date")
 
+        # RECONSTRUCTION (2026-09-16, explicit request: "before show on the
+        # webpage, pls check that there is not missing data in the fetching
+        # period"): TWSE and TPEx share the same national-holiday trading
+        # calendar, so TAIEX's own dates are a reliable reference -- any
+        # trading day TAIEX has real OHLC for but TPEX doesn't is a genuine
+        # gap, surfaced here rather than silently left as a blank spot in
+        # the chart/table below. Runs independently of
+        # market_index_data.py's own fetch-time check
+        # (_missing_tpex_dates_in_range there), so a gap is still caught
+        # even if the fetch script hasn't been re-run recently.
+        if picked_idx == "TPEX":
+            taiex_ref = load_csv(os.path.join(config.DATA_DIR, "market_index", "TAIEX.csv"))
+            if taiex_ref is not None and "Close" in taiex_ref.columns:
+                taiex_dates = sorted(taiex_ref.loc[taiex_ref["Close"].notna(), "Date"])
+                if taiex_dates:
+                    # Exclude the single most recent TAIEX date -- ordinary
+                    # same-day reporting lag between the two exchanges'
+                    # sites shouldn't read as a "gap".
+                    taiex_dates = taiex_dates[:-1]
+                    tpex_dates = set(idx_data.loc[idx_data["Close"].notna(), "Date"].dt.strftime("%Y-%m-%d"))
+                    missing = [d for d in taiex_dates if d not in tpex_dates]
+                    if missing:
+                        preview = "、".join(missing[:5])
+                        more = f" 等共 {len(missing)} 天" if len(missing) > 5 else ""
+                        st.warning(
+                            f"⚠️ 櫃買指數目前有 {len(missing)} 個交易日缺少資料"
+                            f"（{preview}{more}），下方圖表／表格可能不完整。"
+                            f"請在側邊欄重新點擊「抓取大盤指數」，資料會在下次抓取時自動補齊。"
+                        )
+
         latest = idx_data.iloc[-1]
         prev = idx_data.iloc[-2] if len(idx_data) > 1 else None
         change = (latest["Close"] - prev["Close"]) if prev is not None else None
@@ -1124,13 +1154,16 @@ with tab_market_index:
     )
     st.caption(
         "開高低收／成交量來源說明：TAIEX 直接取自 yfinance／Yahoo "
-        "Finance 網站顯示的數字，已與 Yahoo Finance 官網核對一致。"
+        "Finance 網站顯示的數字，已與 Yahoo Finance 官網核對一致，"
+        "成交量為 ^TWII 自身的成交量。"
         "櫃買指數（TPEx）的開高低收改為直接取自櫃買中心官方報表"
         "「櫃買指數(月查詢)」，不再透過 yfinance／Yahoo Finance 抓取"
         "——因為 ^TWOII 這個代碼近期持續無法從 yfinance 取得資料。"
-        "櫃買指數的成交量目前沒有可靠的免費資料來源（^TWOII 故障前"
-        "由 yfinance 提供），因此保留空白，不會用櫃買中心整體市場的"
-        "成交張數（一個規模完全不同、約大上百倍的統計數字）冒充。"
+        "櫃買指數目前沒有「指數本身」的成交量可用（^TWOII 故障前由"
+        "yfinance 提供），因此改用櫃買中心「日成交量值指數」公布的"
+        "成交張數（換算為股數）——這是整個上櫃市場（所有個股加總）的"
+        "整體成交量，範圍與 TAIEX 自身的成交量不同，數字規模也大上"
+        "許多，並非 TAIEX 那種「指數自身」的成交量。"
         "成交金額分別來自兩個交易所各自公布的整體市場成交統計報表——"
         "TAIEX 來自證交所「每日市場成交資訊」，櫃買指數來自櫃買中心"
         "「日成交量值指數」，兩者皆為上市／上櫃市場整體（所有個股加總）"
