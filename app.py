@@ -80,6 +80,7 @@ import market_index_data
 import predict_dividends
 import returns
 import ddm_valuation
+import price_direction
 import user_store
 import institutional_data
 
@@ -404,6 +405,41 @@ DDM_COLUMNS_ZH = {
     "n_years_used_for_growth_fit": "成長率估計年數",
     "anchor_d0_trailing_12mo": "近12個月股利基準值",
     "horizon_years": "折現年限(年)",
+}
+
+
+PRICE_DIRECTION_COLUMN_ORDER = [
+    "code", "name", "latest_date",
+    "latest_p_up_logistic", "latest_mean_5d_return_pct", "latest_sigma_pct",
+    "latest_p_up_3", "latest_p_down_3", "latest_p_up_5", "latest_p_down_5",
+    "latest_p_up_10", "latest_p_down_10",
+    "logistic_brier", "base_rate_only_brier", "beats_base_rate",
+    "n_walk_forward_points", "n_rows_with_sentiment",
+]
+PRICE_DIRECTION_COLUMNS_ZH = {
+    "code": "代號", "name": "中文名稱", "latest_date": "資料日期",
+    "latest_p_up_logistic": "P(上漲，5交易日)",
+    "latest_mean_5d_return_pct": "預測平均5日報酬率%",
+    "latest_sigma_pct": "預測報酬波動率%",
+    "latest_p_up_3": "P(漲幅≥3%)", "latest_p_down_3": "P(跌幅≥3%)",
+    "latest_p_up_5": "P(漲幅≥5%)", "latest_p_down_5": "P(跌幅≥5%)",
+    "latest_p_up_10": "P(漲幅≥10%)", "latest_p_down_10": "P(跌幅≥10%)",
+    "logistic_brier": "Brier分數_邏輯回歸",
+    "base_rate_only_brier": "Brier分數_基準率",
+    "beats_base_rate": "優於基準率？",
+    "n_walk_forward_points": "walk-forward驗證點數",
+    "n_rows_with_sentiment": "含新聞情緒資料筆數",
+}
+PRICE_DIRECTION_WEIGHTS_ZH = {
+    "code": "代號", "feature": "特徵",
+    "ridge_mean_model_coef": "係數_平均報酬模型(Ridge)",
+    "logistic_p_up_model_coef": "係數_P(上漲)模型(邏輯回歸)",
+}
+PRICE_DIRECTION_FEATURE_NAMES_ZH = {
+    "mom_5": "5日動能", "mom_10": "10日動能", "mom_20": "20日動能",
+    "vol_10": "10日波動率", "vol_20": "20日波動率", "vol_ratio": "成交量比",
+    "days_since_ex_div_frac": "距上次除息天數比例",
+    "mean_sentiment": "平均新聞情緒分數", "log1p_headline_count": "新聞篇數(log1p)",
 }
 
 
@@ -963,6 +999,8 @@ if st.sidebar.button("重新計算股利預測", use_container_width=True):
     run_and_log("重新計算股利預測 (predict_dividends.py)", predict_dividends.run)
 if st.sidebar.button("重新計算 DDM 估值", use_container_width=True):
     run_and_log("重新計算 DDM 估值 (ddm_valuation.py)", ddm_valuation.run)
+if st.sidebar.button("重新計算股價方向預測（實驗性）", use_container_width=True):
+    run_and_log("重新計算股價方向預測 (price_direction.py)", price_direction.run)
 
 # --- Header ------------------------------------------------------------------
 
@@ -984,8 +1022,8 @@ if not my_watchlist:
 else:
     st.caption("我的追蹤清單：" + "、".join(f"{s['code']} {s['name']}" for s in my_watchlist))
 
-tab_overview, tab_market_index, tab_prices, tab_dividends, tab_market_value, tab_ddm, tab_news = st.tabs(
-    ["總覽", "大盤指數", "股價", "股利", "市值", "DDM 估值", "新聞"]
+tab_overview, tab_market_index, tab_prices, tab_dividends, tab_market_value, tab_ddm, tab_news, tab_price_direction = st.tabs(
+    ["總覽", "大盤指數", "股價", "股利", "市值", "DDM 估值", "新聞", "股價方向預測（實驗性）"]
 )
 
 # --- Overview ------------------------------------------------------------------
@@ -1492,3 +1530,91 @@ with tab_news:
                 for _, row in news_mine.iterrows():
                     st.markdown(f"**[{row['title']}]({row['link']})**")
                     st.caption(f"{row['company']} ({row['code']}) · {row['source']} · {row['published']}")
+
+# --- Price direction (experimental) -----------------------------------------
+#
+# Added 2026-10-08 -- see price_direction.py's module docstring for the
+# full design. This tab is deliberately upfront, not quietly optimistic,
+# about what a genuine walk-forward backtest against this project's own
+# data actually found: the momentum/volatility/volume feature set does
+# NOT reliably beat the simple historical base rate for calling
+# direction. Showing that honestly (rather than only the "latest
+# prediction" numbers) is itself part of the dissertation's methodology
+# -- see the research report discussed in chat for why this result is
+# expected, not a failure of this prototype.
+
+with tab_price_direction:
+    if not my_watchlist:
+        st.info(NO_WATCHLIST_MSG)
+    else:
+        st.warning(
+            "**實驗性功能，非投資建議。** 這是論文股價預測方向的研究原型，"
+            "用這個專案自己的歷史資料做過 walk-forward 回測，誠實的結論是："
+            "動能／波動率／成交量這組特徵，目前並沒有穩定打敗「歷史基準"
+            "上漲比例」這個最簡單的基準線（下表「優於基準率？」大多是"
+            "False）。這個結果本身符合效率市場假說的文獻，值得在論文中"
+            "誠實討論，不代表程式有錯。新聞情緒這項特徵需要先在本機執行 "
+            "`news_sentiment.py`（見下方說明）才會有真實資料，否則一律是 0。"
+        )
+
+        pd_summary = load_csv(os.path.join(config.DATA_DIR, "predictions", "price_direction_summary.csv"))
+        if pd_summary is None:
+            st.info("尚無股價方向預測結果 -- 請在側邊欄點擊「重新計算股價方向預測（實驗性）」"
+                    "（需要先有股價、股利資料，且每檔股票至少要有約一年以上的股價歷史）。")
+        else:
+            my_codes = [s["code"] for s in my_watchlist]
+            pd_mine = pd_summary[pd_summary["code"].isin(my_codes)]
+            if pd_mine.empty:
+                st.info("你的追蹤清單中的股票尚無股價方向預測結果（可能是股價歷史還不滿一年）"
+                        " -- 請在側邊欄點擊「重新計算股價方向預測（實驗性）」。")
+            else:
+                st.caption("「P(上漲，5交易日)」與各門檻機率都是以收盤後可取得的資料預測"
+                           "「未來5個交易日」的報酬，不是預測某一天。")
+                st.dataframe(
+                    display_table(pd_mine, column_order=PRICE_DIRECTION_COLUMN_ORDER,
+                                  labels=PRICE_DIRECTION_COLUMNS_ZH),
+                    use_container_width=True, hide_index=True,
+                )
+
+                n_with_sentiment = int(pd_mine["n_rows_with_sentiment"].sum())
+                if n_with_sentiment == 0:
+                    st.caption(
+                        "目前「含新聞情緒資料筆數」全部是 0 -- 表示 data/news/news_sentiment.csv "
+                        "還不存在或還沒有足夠歷史。做法：在本機安裝 `transformers`/`torch`"
+                        "（`pip install transformers torch`，刻意不放進 requirements.txt，"
+                        "避免部署的 App 載入這個模型），執行 `python news_sentiment.py`，"
+                        "它會順便把結果推回 GitHub；之後持續、定期重新抓取新聞"
+                        "（新聞不會retroactively補齊，只會從現在開始累積歷史），累積幾週/幾個月"
+                        "的真實每日覆蓋率後，再重新計算這裡的預測，才能真正檢驗新聞情緒這個"
+                        "特徵有沒有用。"
+                    )
+
+                with st.expander("各特徵的模型係數（透明度用途，不代表因果關係）", expanded=False):
+                    pd_weights = load_csv(os.path.join(config.DATA_DIR, "predictions", "price_direction_weights.csv"))
+                    if pd_weights is None:
+                        st.caption("尚無資料。")
+                    else:
+                        weights_mine = pd_weights[pd_weights["code"].isin(my_codes)].copy()
+                        weights_mine["feature"] = weights_mine["feature"].map(PRICE_DIRECTION_FEATURE_NAMES_ZH).fillna(weights_mine["feature"])
+                        st.dataframe(
+                            display_table(weights_mine, labels=PRICE_DIRECTION_WEIGHTS_ZH),
+                            use_container_width=True, hide_index=True,
+                        )
+
+                with st.expander("校準檢查（預測機率 vs. 實際發生頻率，5組）", expanded=False):
+                    st.caption(
+                        "理想情況下兩欄數字應該很接近（預測60%上漲，實際也差不多60%的時間真的上漲）。"
+                        "差距大代表模型的機率數字本身不可靠，就算方向判斷偶爾猜對也一樣。"
+                    )
+                    pd_calib = load_csv(os.path.join(config.DATA_DIR, "predictions", "price_direction_calibration.csv"))
+                    if pd_calib is None:
+                        st.caption("尚無資料。")
+                    else:
+                        calib_mine = pd_calib[pd_calib["code"].isin(my_codes)]
+                        st.dataframe(
+                            display_table(calib_mine, labels={
+                                "code": "代號", "predicted_p_up": "預測P(上漲)",
+                                "realized_freq_up": "實際上漲頻率", "n": "樣本數",
+                            }),
+                            use_container_width=True, hide_index=True,
+                        )
