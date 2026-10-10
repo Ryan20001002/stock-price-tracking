@@ -46,21 +46,40 @@ project rather than fetching anything new:
     capped at 1.0), from predict_dividends.load_dividends().
   - NEWS SENTIMENT (by explicit request, 2026-10-08): mean_sentiment and
     log1p(headline_count), from data/news/news_sentiment.csv if it
-    exists (see news_sentiment.py, which must be run LOCALLY -- it needs
-    `transformers`/`torch`, which this app's requirements.txt
-    deliberately does NOT include, since that model and its weights have
-    no reason to load inside the deployed Streamlit container). Lagged
-    the same no-leakage way as news_sentiment.daily_sentiment_features():
-    only headlines strictly BEFORE the prediction date count, because
+    exists. Two scorers can produce this file, both writing the same
+    schema so this module needs zero changes to read either one:
+      * news_sentiment_lexicon.py (added 2026-10-10, by explicit
+        request -- "ship to A"): a dependency-free, self-curated
+        Chinese financial-sentiment word-list scorer. Runs INSIDE the
+        deployed app itself via a sidebar button (no network, no heavy
+        model, done in microseconds) -- this is now the normal way
+        news_sentiment.csv gets populated, local run no longer
+        required. See that module's own docstring for the full
+        methodology and its honest caveats (the word list is NOT the
+        real NTUSD dictionary -- that couldn't be sourced from this
+        project's dev sandbox -- it's hand-curated and should be
+        described as such in any methodology write-up).
+      * news_sentiment.py (the original approach): a Hugging Face
+        BERT classifier (yiyanghkust/finbert-tone-chinese), more
+        accurate in principle but must be run LOCALLY -- it needs
+        `transformers`/`torch`, which this app's requirements.txt
+        deliberately does NOT include, since that model and its
+        weights have no reason to load inside the deployed Streamlit
+        container (and risk crashing it -- see that module's
+        docstring). A local run of it overwrites whatever
+        news_sentiment_lexicon.py had scored.
+    Both are lagged the same no-leakage way (see
+    lagged_sentiment_features() below, a local reimplementation of
+    news_sentiment.daily_sentiment_features()'s contract): only
+    headlines strictly BEFORE the prediction date count, because
     Taiwanese retail headlines often just describe a price move that
     ALREADY happened -- same-day sentiment would be a disguised form of
-    look-ahead leakage. If news_sentiment.csv doesn't exist (true for a
-    fresh checkout, and for the deployed app until a local run has been
-    pushed -- see this module's own __main__ block and
-    market_data_sync.py), both sentiment columns are a harmless constant
-    0.0/0.0 for every row: the model mechanically learns nothing from a
-    constant, so its fitted weight for those two features will show as
-    (very close to) zero until real, varying sentiment data exists.
+    look-ahead leakage. If news_sentiment.csv doesn't exist yet (true
+    until either scorer has been run at least once), both sentiment
+    columns are a harmless constant 0.0/0.0 for every row: the model
+    mechanically learns nothing from a constant, so its fitted weight
+    for those two features will show as (very close to) zero until
+    real, varying sentiment data exists.
 
 Validation: walk-forward (expanding window), retrained every
 REFIT_EVERY trading days, never using any future data at the time of a
@@ -140,13 +159,14 @@ def load_volume(code):
 
 def load_sentiment_rows():
     """Returns every scored-headline row from data/news/news_sentiment.csv
-    (as produced, LOCALLY, by news_sentiment.py -- see that module and
-    this one's own docstring for why this app never runs the sentiment
-    model itself), or [] if that file doesn't exist on this container
-    yet. Returning [] is what makes lagged_sentiment_features() fall
-    back to the inert (0.0, 0) default for every row, so this still runs
-    end-to-end without real sentiment data -- it just can't learn
-    anything from a feature that's constant."""
+    (as produced either by news_sentiment_lexicon.py's in-app sidebar
+    button, or by a local run of news_sentiment.py -- see this module's
+    own docstring for how the two scorers relate), or [] if that file
+    doesn't exist on this container yet. Returning [] is what makes
+    lagged_sentiment_features() fall back to the inert (0.0, 0) default
+    for every row, so this still runs end-to-end without real sentiment
+    data -- it just can't learn anything from a feature that's
+    constant."""
     if not os.path.exists(SENTIMENT_CSV):
         return []
     rows = []
@@ -162,8 +182,8 @@ def lagged_sentiment_features(scored_rows, code, as_of_date, lookback_days=SENTI
     (mean_score, headline_count) using ONLY headlines for `code`
     published STRICTLY BEFORE as_of_date (a date object), within the
     trailing lookback_days. Returns (0.0, 0) when there's no match --
-    either genuinely no news that day, or (until a local news_sentiment.py
-    run has been pushed) because scored_rows is always []."""
+    either genuinely no news that day, or (until either sentiment scorer
+    has been run at least once) because scored_rows is always []."""
     if not scored_rows:
         return 0.0, 0
     as_of_iso = as_of_date.isoformat()
@@ -328,7 +348,8 @@ def run():
     else:
         print("[price_direction] no data/news/news_sentiment.csv -- mean_sentiment/"
               "log1p_headline_count will be a constant 0.0/0.0 for every ticker below "
-              "(run news_sentiment.py locally, then let it push to GitHub, to change this).")
+              "(click the app's \"重新計算新聞情緒（詞典法，實驗性）\" sidebar button, or "
+              "run news_sentiment.py locally and let it push to GitHub, to change this).")
 
     summary_rows = []
     weight_rows = []

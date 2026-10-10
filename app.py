@@ -81,6 +81,7 @@ import predict_dividends
 import returns
 import ddm_valuation
 import price_direction
+import news_sentiment_lexicon
 import user_store
 import institutional_data
 
@@ -994,11 +995,13 @@ if st.sidebar.button("抓取大盤指數（TAIEX／櫃買指數）", use_contain
     run_and_log("抓取大盤指數 (market_index_data.py)", market_index_data.run, sync_category="market_index")
 
 st.sidebar.divider()
-st.sidebar.caption("以下兩個按鈕只會重新計算已存在的本機資料，速度快，不會連線網路。")
+st.sidebar.caption("以下按鈕只會重新計算已存在的本機資料，速度快，不會連線網路。")
 if st.sidebar.button("重新計算股利預測", use_container_width=True):
     run_and_log("重新計算股利預測 (predict_dividends.py)", predict_dividends.run)
 if st.sidebar.button("重新計算 DDM 估值", use_container_width=True):
     run_and_log("重新計算 DDM 估值 (ddm_valuation.py)", ddm_valuation.run)
+if st.sidebar.button("重新計算新聞情緒（詞典法，實驗性）", use_container_width=True):
+    run_and_log("重新計算新聞情緒 (news_sentiment_lexicon.py)", news_sentiment_lexicon.run)
 if st.sidebar.button("重新計算股價方向預測（實驗性）", use_container_width=True):
     run_and_log("重新計算股價方向預測 (price_direction.py)", price_direction.run)
 
@@ -1553,8 +1556,9 @@ with tab_price_direction:
             "動能／波動率／成交量這組特徵，目前並沒有穩定打敗「歷史基準"
             "上漲比例」這個最簡單的基準線（下表「優於基準率？」大多是"
             "False）。這個結果本身符合效率市場假說的文獻，值得在論文中"
-            "誠實討論，不代表程式有錯。新聞情緒這項特徵需要先在本機執行 "
-            "`news_sentiment.py`（見下方說明）才會有真實資料，否則一律是 0。"
+            "誠實討論，不代表程式有錯。新聞情緒這項特徵需要先點側邊欄的"
+            "「重新計算新聞情緒（詞典法，實驗性）」按鈕（見下方說明）"
+            "才會有真實資料，否則一律是 0。"
         )
 
         pd_summary = load_csv(os.path.join(config.DATA_DIR, "predictions", "price_direction_summary.csv"))
@@ -1580,13 +1584,17 @@ with tab_price_direction:
                 if n_with_sentiment == 0:
                     st.caption(
                         "目前「含新聞情緒資料筆數」全部是 0 -- 表示 data/news/news_sentiment.csv "
-                        "還不存在或還沒有足夠歷史。做法：在本機安裝 `transformers`/`torch`"
-                        "（`pip install transformers torch`，刻意不放進 requirements.txt，"
-                        "避免部署的 App 載入這個模型），執行 `python news_sentiment.py`，"
-                        "它會順便把結果推回 GitHub；之後持續、定期重新抓取新聞"
-                        "（新聞不會retroactively補齊，只會從現在開始累積歷史），累積幾週/幾個月"
-                        "的真實每日覆蓋率後，再重新計算這裡的預測，才能真正檢驗新聞情緒這個"
-                        "特徵有沒有用。"
+                        "還不存在或還沒有足夠歷史。**最快的做法**：直接點側邊欄的「重新計算"
+                        "新聞情緒（詞典法，實驗性）」按鈕 -- 不需安裝任何套件、不連網路，幾秒內"
+                        "就能算出分數（用的是自建的中文財經詞典比對法，不是訓練好的模型，方法"
+                        "與限制見 news_sentiment_lexicon.py 的說明文件）。"
+                        "如果想改用訓練過的模型（較準確但較重、需另外安裝）：在本機安裝 "
+                        "`transformers`/`torch`（`pip install transformers torch`，刻意不放進 "
+                        "requirements.txt，避免部署的 App 載入這個模型），執行 "
+                        "`python news_sentiment.py`，它會順便把結果推回 GitHub，並覆蓋詞典法算"
+                        "出的分數。兩種方法都一樣：新聞不會retroactively補齊，只會從現在開始累積"
+                        "歷史，需要持續、定期重新抓取新聞，累積幾週/幾個月的真實每日覆蓋率後，"
+                        "再重新計算這裡的預測，才能真正檢驗新聞情緒這個特徵有沒有用。"
                     )
 
                 with st.expander("各特徵的模型係數（透明度用途，不代表因果關係）", expanded=False):
